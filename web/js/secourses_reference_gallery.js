@@ -11,6 +11,7 @@
 
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import { resolveConfiguredPrompt } from "./secourses_reference_gallery_state.mjs";
 
 const NODE_CLASS = "SECoursesReferenceGallery";
 const UPLOAD_SUBFOLDER = "reference_gallery";
@@ -139,18 +140,21 @@ class ReferenceGalleryUI {
         this.state = { images: [], videos: [], audios: [] };
         this.suggestIndex = 0;
         this.suggestMatches = null;
+        this.hasHydratedPrompt = false;
+        this.promptTouched = false;
         this.buildDOM();
         hideWidget(this.promptWidget);
         hideWidget(this.manifestWidget);
         const ui = this;
         this.widget = node.addDOMWidget("gallery_ui", "secourses_gallery", this.root, {
-            serialize: false,
             hideOnZoom: false,
             getValue: () => ui.manifestWidget?.value ?? "{}",
             setValue: () => {},
         });
+        // Current ComfyUI checks the widget property, not options.serialize.
+        this.widget.serialize = false;
         this.widget.computeSize = (width) => [width, ui.computeHeight(width ?? ui.node.size[0])];
-        this.syncFromWidgets();
+        this.syncFromWidgets({ hydratePrompt: true });
         if (node.size[0] < 420) {
             node.setSize([420, node.size[1]]);
         }
@@ -255,6 +259,7 @@ class ReferenceGalleryUI {
         });
 
         this.textarea.addEventListener("input", () => {
+            this.promptTouched = true;
             this.syncPromptToWidget();
             this.renderOverlay();
             this.updateSuggestions();
@@ -268,7 +273,7 @@ class ReferenceGalleryUI {
 
     // ==================== State & widgets sync ====================
 
-    syncFromWidgets() {
+    syncFromWidgets({ hydratePrompt = false } = {}) {
         let parsed = {};
         try {
             parsed = JSON.parse(this.manifestWidget?.value || "{}");
@@ -280,8 +285,28 @@ class ReferenceGalleryUI {
             videos: Array.isArray(parsed.videos) ? parsed.videos.filter((e) => e && e.file) : [],
             audios: Array.isArray(parsed.audios) ? parsed.audios.filter((e) => e && e.file) : [],
         };
-        this.textarea.value = this.promptWidget?.value ?? "";
+        if (hydratePrompt) {
+            this.textarea.value = this.promptWidget?.value ?? "";
+        }
         this.render();
+    }
+
+    configureFromWidgets() {
+        const configured = resolveConfiguredPrompt(
+            this.textarea.value,
+            this.promptWidget?.value,
+            this.hasHydratedPrompt,
+            this.promptTouched,
+        );
+        this.syncFromWidgets();
+        this.textarea.value = configured.value;
+        if (!configured.hydrateFromWidget) {
+            // Attachment-only configuration may have restored a stale hidden
+            // widget value. Put the live editor value back immediately.
+            this.syncPromptToWidget();
+        }
+        this.hasHydratedPrompt = true;
+        this.renderOverlay();
     }
 
     saveManifest() {
@@ -395,6 +420,7 @@ class ReferenceGalleryUI {
         }
         if (updated !== original) {
             this.textarea.value = updated;
+            this.promptTouched = true;
             this.syncPromptToWidget();
         }
     }
@@ -527,6 +553,7 @@ class ReferenceGalleryUI {
         const position = before.length + insert.length;
         box.focus();
         box.setSelectionRange(position, position);
+        this.promptTouched = true;
         this.syncPromptToWidget();
         this.renderOverlay();
     }
@@ -706,6 +733,7 @@ class ReferenceGalleryUI {
         const position = before.length + insert.length;
         box.focus();
         box.setSelectionRange(position, position);
+        this.promptTouched = true;
         this.syncPromptToWidget();
         this.renderOverlay();
         this.closeSuggestions();
@@ -756,7 +784,7 @@ app.registerExtension({
             this.__refGallery = new ReferenceGalleryUI(this);
         });
         chainCallback(nodeType.prototype, "onConfigure", function () {
-            this.__refGallery?.syncFromWidgets();
+            this.__refGallery?.configureFromWidgets();
         });
     },
 });
