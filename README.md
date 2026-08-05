@@ -19,6 +19,13 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   - Up to 9 images, 3 videos, 3 audio files.
   - Videos are resampled to `video_fps` (24 for MiniMax H3), trimmed to
     `max_seconds`, and their soundtrack is paired automatically.
+  - Large media is decoded only after the adapter knows the required canvas
+    and duration. Images are downscaled before float conversion; video frames
+    are scaled during FFmpeg decode and trimmed to the usable H3 frame count.
+    The original aspect ratio is retained on H3's 32-pixel canvas grid, and
+    shared RAM budgets prevent high-megapixel attachments from causing an OOM.
+    Inputs above 100 MP per image or 40 MP per video frame fail with a clear
+    validation error instead of attempting an unsafe allocation.
   - Token aliases: `@img1`, `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`,
     and `@image#1` all work.
 - **MiniMax H3 References (Gallery)** — adapts the gallery pack to MiniMax H3.
