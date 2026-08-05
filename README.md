@@ -32,6 +32,15 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.
 
+## Synchronized resolution controls
+
+**SECourses Resolution Sync** keeps aspect ratio, megapixels, width, and height
+synchronized in both directions. Width and height are persisted as the
+authoritative workflow values, so browser edits and API execution resolve to
+the same dimensions. The advanced `multiple` setting controls dimension
+snapping; use `32` for MiniMax H3 generation canvases or `1` when a workflow
+aligns the model canvas separately from an exact final output size.
+
 ## LTX 2.3 Foley nodes
 
 Low-memory streaming helpers for the LTX 2.3 Foley video-to-audio workflow:
