@@ -63,12 +63,19 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
     Audio labels index video soundtracks first, so standalone audio tokens are
     shifted by ``audio_label_offset`` (the number of videos that carry sound).
     Legacy '<Picture 1>' labels typed directly in the prompt pass through
-    unchanged. Raises ``ValueError`` on tokens that point at missing references.
+    unchanged. Tokens that point at a missing reference (eg '@image3' with two
+    images attached) are silently omitted, together with one adjacent space, so
+    a stale token left in the prompt never blocks execution.
     """
     if not prompt or "@" not in prompt:
         return prompt
 
-    def replace(match):
+    pieces = []
+    last = 0
+    omitted = []
+    for match in TOKEN_MATCHER.finditer(prompt):
+        pieces.append(prompt[last:match.start()])
+        last = match.end()
         kind = _CANONICAL_TYPE[match.group("type").lower()]
         number = int(match.group("num"))
         label, count, offset = {
@@ -76,18 +83,22 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
             "video": ("Video", video_count, 0),
             "audio": ("Audio", audio_count, audio_label_offset),
         }[kind]
-        if number < 1:
-            raise ValueError(
-                f"The prompt reference '{match.group(0)}' is invalid: reference numbering starts at 1, eg '@{kind}1'."
-            )
-        if number > count:
-            plural = " is" if count == 1 else "s are"
-            raise ValueError(
-                f"The prompt references '{match.group(0)}' but only {count} {kind} reference{plural} attached."
-            )
-        return f"<{label} {offset + number}>"
-
-    return TOKEN_MATCHER.sub(replace, prompt)
+        if 1 <= number <= count:
+            pieces.append(f"<{label} {offset + number}>")
+            continue
+        omitted.append(match.group(0))
+        if last < len(prompt) and prompt[last] == " ":
+            last += 1
+        elif pieces and pieces[-1].endswith(" "):
+            pieces[-1] = pieces[-1][:-1]
+    pieces.append(prompt[last:])
+    if omitted:
+        print(
+            "[SECoursesMiniMaxH3References] ignoring prompt reference(s) with no matching attachment: "
+            + ", ".join(omitted),
+            flush=True,
+        )
+    return "".join(pieces)
 
 
 def _parse_manifest(references):

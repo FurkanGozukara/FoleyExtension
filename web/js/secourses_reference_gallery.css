@@ -105,6 +105,18 @@
     box-shadow: 0 0 0 1px color-mix(in srgb, var(--ref-color, #aaa) 65%, transparent);
 }
 
+.secourses-refgal-card-dragging {
+    opacity: 0.45;
+}
+
+.secourses-refgal-drop-before {
+    box-shadow: -4px 0 0 0 #7d5698 !important;
+}
+
+.secourses-refgal-drop-after {
+    box-shadow: 4px 0 0 0 #7d5698 !important;
+}
+
 .secourses-refgal-card-missing {
     border-color: #ff6b6b;
 }

@@ -15,6 +15,7 @@ import { resolveConfiguredPrompt } from "./secourses_reference_gallery_state.mjs
 
 const NODE_CLASS = "SECoursesReferenceGallery";
 const UPLOAD_SUBFOLDER = "reference_gallery";
+const REORDER_MIME = "application/x-secourses-reference";
 
 /** Per-type '@' aliases, limits, and pill palettes, matching the SwarmUI extension. */
 const REFERENCE_TYPES = {
@@ -142,6 +143,7 @@ class ReferenceGalleryUI {
         this.suggestMatches = null;
         this.hasHydratedPrompt = false;
         this.promptTouched = false;
+        this.dragContext = null;
         this.buildDOM();
         hideWidget(this.promptWidget);
         hideWidget(this.manifestWidget);
@@ -245,6 +247,25 @@ class ReferenceGalleryUI {
             event.preventDefault();
             event.stopPropagation();
             await this.addFiles(files);
+        });
+
+        // Internal card reordering (never carries files, so the file-drop
+        // handlers above ignore it and vice versa).
+        this.cardsWrap.addEventListener("dragover", (event) => {
+            if (!this.dragContext) return;
+            event.preventDefault();
+            event.stopPropagation();
+            event.dataTransfer.dropEffect = "move";
+            this.updateDropMarker(this.reorderInsertPos(event));
+        });
+        this.cardsWrap.addEventListener("drop", (event) => {
+            if (!this.dragContext) return;
+            event.preventDefault();
+            event.stopPropagation();
+            const { type, index } = this.dragContext;
+            this.moveReference(type, index, this.reorderInsertPos(event));
+            this.dragContext = null;
+            this.clearDropMarkers();
         });
 
         this.textarea.addEventListener("paste", async (event) => {
@@ -388,40 +409,57 @@ class ReferenceGalleryUI {
         const list = this.entriesOf(type);
         if (index < 0 || index >= list.length) return;
         list.splice(index, 1);
-        // Renumber surviving tokens and drop tokens of the removed reference, like SwarmUI.
-        const mapping = {};
-        for (let old = 1; old <= list.length + 1; old++) {
-            if (old - 1 < index) mapping[old] = old;
-            else if (old - 1 > index) mapping[old] = old - 1;
-        }
-        this.renumberTokensAfterRemoval(type, mapping);
+        // The prompt text is never touched: surviving references renumber by
+        // position, and a token now pointing past the list renders as inactive
+        // and is omitted at execution time instead of erroring.
         this.saveManifest();
         this.render();
     }
 
-    renumberTokensAfterRemoval(type, mapping) {
-        const aliases = REFERENCE_TYPES[type].aliases.join("|");
-        const tokenRegex = new RegExp(`(?<![\\w@])@(?:${aliases})#?(\\d{1,2})(?![0-9a-zA-Z]) ?`, "gi");
-        const original = this.textarea.value;
-        let updated = original.replace(tokenRegex, (match, num) => {
-            const n = parseInt(num);
-            const trailing = match.endsWith(" ") ? " " : "";
-            return mapping[n] ? `@${type}${mapping[n]}${trailing}` : "";
-        });
-        if (type !== "audio") {
-            // Legacy audio labels are offset by the video count, so only image/video legacy labels renumber safely.
-            const label = REFERENCE_TYPES[type].label;
-            const legacyRegex = new RegExp(`<${label}[ ]?(\\d{1,2})> ?`, "gi");
-            updated = updated.replace(legacyRegex, (match, num) => {
-                const n = parseInt(num);
-                const trailing = match.endsWith(" ") ? " " : "";
-                return mapping[n] ? `<${label} ${mapping[n]}>${trailing}` : "";
-            });
+    moveReference(type, from, insertPos) {
+        const list = this.entriesOf(type);
+        if (from < 0 || from >= list.length) return;
+        let to = insertPos > from ? insertPos - 1 : insertPos;
+        to = Math.max(0, Math.min(list.length - 1, to));
+        if (to === from) return;
+        const [entry] = list.splice(from, 1);
+        list.splice(to, 0, entry);
+        // Reference numbers follow position; the prompt text stays untouched.
+        this.saveManifest();
+        this.render();
+    }
+
+    /** Cards of the same type as the current drag, in display order. */
+    reorderPeers() {
+        return [...this.cards.querySelectorAll(`.secourses-refgal-card[data-ref-type="${this.dragContext.type}"]`)];
+    }
+
+    /** Insertion slot [0..n] among same-type cards for the pointer position. */
+    reorderInsertPos(event) {
+        let pos = 0;
+        for (const card of this.reorderPeers()) {
+            const rect = card.getBoundingClientRect();
+            if (event.clientY > rect.bottom || (event.clientY >= rect.top && event.clientX > rect.left + rect.width / 2)) {
+                pos++;
+            }
         }
-        if (updated !== original) {
-            this.textarea.value = updated;
-            this.promptTouched = true;
-            this.syncPromptToWidget();
+        return pos;
+    }
+
+    updateDropMarker(insertPos) {
+        this.clearDropMarkers();
+        const peers = this.reorderPeers();
+        if (!peers.length) return;
+        if (insertPos < peers.length) {
+            peers[insertPos].classList.add("secourses-refgal-drop-before");
+        } else {
+            peers[peers.length - 1].classList.add("secourses-refgal-drop-after");
+        }
+    }
+
+    clearDropMarkers() {
+        for (const card of this.cards.querySelectorAll(".secourses-refgal-drop-before, .secourses-refgal-drop-after")) {
+            card.classList.remove("secourses-refgal-drop-before", "secourses-refgal-drop-after");
         }
     }
 
@@ -447,7 +485,20 @@ class ReferenceGalleryUI {
         const card = document.createElement("div");
         card.className = "secourses-refgal-card";
         card.style.setProperty("--ref-color", item.color);
-        card.title = `${item.filename}\nClick to insert ${item.token} into the prompt`;
+        card.dataset.refType = item.type;
+        card.title = `${item.filename}\nClick to insert ${item.token} into the prompt.\nDrag left/right to reorder (tokens renumber by position).`;
+        card.draggable = true;
+        card.addEventListener("dragstart", (event) => {
+            this.dragContext = { type: item.type, index: item.n - 1 };
+            event.dataTransfer.effectAllowed = "move";
+            event.dataTransfer.setData(REORDER_MIME, `${item.type}:${item.n - 1}`);
+            card.classList.add("secourses-refgal-card-dragging");
+        });
+        card.addEventListener("dragend", () => {
+            this.dragContext = null;
+            this.clearDropMarkers();
+            card.classList.remove("secourses-refgal-card-dragging");
+        });
 
         const remove = document.createElement("button");
         remove.type = "button";
@@ -481,6 +532,7 @@ class ReferenceGalleryUI {
             media.preload = "metadata";
         }
         media.className = `secourses-refgal-media secourses-refgal-media-${item.type}`;
+        media.draggable = false;
         media.addEventListener("error", () => card.classList.add("secourses-refgal-card-missing"));
 
         const label = document.createElement("span");

@@ -13,9 +13,11 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   shows as a thumbnail card with its own colored `@image1` / `@video1` /
   `@audio1` token. The built-in prompt box renders the tokens as colored pills,
   autocompletes them when you type `@`, and clicking a card inserts its token
-  at the cursor. Removing a card renumbers the remaining tokens in the prompt
-  automatically. Files upload through ComfyUI's native `/upload/image` endpoint
-  into `input/reference_gallery/`.
+  at the cursor. Cards can be dragged left/right to reorder; tokens renumber by
+  card position. The prompt text itself is never modified by removing or
+  reordering cards — a token without a matching attachment shows in red and is
+  simply ignored at generation time. Files upload through ComfyUI's native
+  `/upload/image` endpoint into `input/reference_gallery/`.
   - Up to 9 images, 3 videos, 3 audio files.
   - Videos are resampled to `video_fps` (24 for MiniMax H3), trimmed to
     `max_seconds`, and their soundtrack is paired automatically.
