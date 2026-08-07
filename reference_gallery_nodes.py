@@ -15,6 +15,9 @@ Two nodes cooperate to replace banks of LoadImage / LoadVideo / LoadAudio nodes:
 - ``SECoursesBatchVideoMerge`` optionally gathers the mapped folder-batch
   videos, concatenates one MP4 per prompt directory, and previews only the
   final merged file while the normal Save Video node remains unchanged.
+- ``SECoursesBatchAudioMerge`` does the same for the audio-only preset,
+  concatenating lossless waveform data and saving one FLAC per directory after
+  the individual audio clips have been saved.
 
 Future reference-driven models only need another thin adapter node; the
 gallery, its UI, and the ``@`` token grammar stay identical.
@@ -368,37 +371,47 @@ def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_second
     return packs, prompts
 
 
-def _batch_video_merge_groups(videos, reference_packs):
-    """Group generated videos by their folder-batch directory in prompt order."""
-    if len(videos) != len(reference_packs):
+def _batch_output_merge_groups(values, reference_packs, value_key):
+    """Group generated values by their folder-batch directory in prompt order."""
+    if len(values) != len(reference_packs):
         raise ValueError(
-            "Folder batch video merge received a different number of videos "
-            f"({len(videos)}) and reference packs ({len(reference_packs)})."
+            f"Folder batch {value_key[:-1]} merge received a different number of {value_key} "
+            f"({len(values)}) and reference packs ({len(reference_packs)})."
         )
 
     grouped = {}
-    for video, pack in zip(videos, reference_packs):
+    for value, pack in zip(values, reference_packs):
         batch = pack.get("batch") if isinstance(pack, dict) else None
         if not isinstance(batch, dict):
             continue
         root = str(batch.get("root") or "").strip()
         folder = str(batch.get("folder") or "root").strip() or "root"
         if not root:
-            raise ValueError("Folder batch video merge is missing the validated batch root.")
+            raise ValueError(
+                f"Folder batch {value_key[:-1]} merge is missing the validated batch root."
+            )
         key = (root, folder)
         group = grouped.setdefault(key, {"root": root, "folder": folder, "items": []})
         try:
             index = int(batch.get("index", len(group["items"]) + 1))
         except (TypeError, ValueError):
             index = len(group["items"]) + 1
-        group["items"].append((index, video))
+        group["items"].append((index, value))
 
     groups = []
     for group in grouped.values():
         group["items"].sort(key=lambda item: item[0])
-        group["videos"] = [video for _, video in group.pop("items")]
+        group[value_key] = [value for _, value in group.pop("items")]
         groups.append(group)
     return groups
+
+
+def _batch_video_merge_groups(videos, reference_packs):
+    return _batch_output_merge_groups(videos, reference_packs, "videos")
+
+
+def _batch_audio_merge_groups(audios, reference_packs):
+    return _batch_output_merge_groups(audios, reference_packs, "audios")
 
 
 def _safe_merge_output_component(value, fallback):
@@ -421,6 +434,12 @@ def _merge_output_prefix(root, folder):
         folder_parts = ["root"]
     folder_name = "_".join(folder_parts)
     return f"video/MiniMax_H3_Merged_{root_name}_{folder_name}"
+
+
+def _merge_audio_output_prefix(root, folder):
+    video_prefix = _merge_output_prefix(root, folder)
+    suffix = video_prefix.removeprefix("video/MiniMax_H3_Merged_")
+    return f"audio/MiniMax_H3_Audio_Merged_{suffix}"
 
 
 def _write_concat_manifest(path, video_paths):
@@ -504,6 +523,77 @@ def _merge_batch_video_group(group):
         "format": "video/mp4",
         "fullpath": str(output_path),
     }
+
+
+def _concatenate_batch_audio(audios):
+    import torch
+
+    if not audios:
+        raise ValueError("Folder batch audio merge received no audio clips.")
+
+    waveforms = []
+    sample_rate = None
+    leading_shape = None
+    dtype = None
+    device = None
+    for index, audio in enumerate(audios, start=1):
+        if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
+            raise ValueError(f"Folder batch audio merge received invalid AUDIO item {index}.")
+        waveform = audio["waveform"]
+        if not isinstance(waveform, torch.Tensor) or waveform.ndim != 3:
+            raise ValueError(
+                f"Folder batch audio merge expected item {index} waveform as [batch, channels, samples]."
+            )
+        if waveform.shape[0] != 1 or waveform.shape[-1] < 1:
+            raise ValueError(
+                "Folder batch audio merge requires one non-empty waveform per prompt."
+            )
+        current_rate = int(audio["sample_rate"])
+        current_shape = tuple(waveform.shape[:-1])
+        if sample_rate is None:
+            sample_rate = current_rate
+            leading_shape = current_shape
+            dtype = waveform.dtype
+            device = waveform.device
+        elif (
+            current_rate != sample_rate
+            or current_shape != leading_shape
+            or waveform.dtype != dtype
+            or waveform.device != device
+        ):
+            raise ValueError(
+                "Folder batch audio clips must have matching sample rates, channels, dtype, and device."
+            )
+        waveforms.append(waveform)
+
+    merged = dict(audios[0])
+    merged["waveform"] = torch.cat(waveforms, dim=-1)
+    merged["sample_rate"] = sample_rate
+    return merged
+
+
+def _merge_batch_audio_group(group):
+    import folder_paths
+    from comfy_api.latest import io as comfy_io
+    from comfy_api.latest import ui
+
+    merged = _concatenate_batch_audio(group["audios"])
+    prefix = _merge_audio_output_prefix(group["root"], group["folder"])
+    saved = ui.AudioSaveHelper.save_audio(
+        merged,
+        filename_prefix=prefix,
+        folder_type=comfy_io.FolderType.output,
+        cls=None,
+        format="flac",
+    )
+    if not saved:
+        raise RuntimeError("Folder batch audio merge did not save a FLAC output.")
+    result = dict(saved[-1])
+    result["format"] = "audio/flac"
+    result["fullpath"] = str(
+        Path(folder_paths.get_output_directory()) / result["subfolder"] / result["filename"]
+    )
+    return result
 
 
 def _resolve_reference_entry(entry):
@@ -1261,7 +1351,7 @@ class SECoursesBatchVideoMerge:
         return {
             "required": {
                 "video": ("VIDEO", {
-                    "tooltip": "The generated folder-batch videos. Connect the same VIDEO output used by Save Video.",
+                    "tooltip": "The generated folder-batch videos. Connect Save Video's VIDEO output so every individual clip is saved before the final merged preview.",
                 }),
                 "references": (REF_PACK_TYPE, {
                     "tooltip": "Folder and prompt-order metadata from SECourses Reference Gallery.",
@@ -1311,6 +1401,63 @@ class SECoursesBatchVideoMerge:
             for key in ("filename", "subfolder", "type")
         }
         return {"ui": {"images": [preview], "animated": (True,)}}
+
+
+class SECoursesBatchAudioMerge:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO", {
+                    "tooltip": "Connect Save Audio's AUDIO output so every individual FLAC is saved before the final merged preview.",
+                }),
+                "references": (REF_PACK_TYPE, {
+                    "tooltip": "Folder and prompt-order metadata from SECourses Reference Gallery.",
+                }),
+                "merge_batch_audio": ("BOOLEAN", {
+                    "tooltip": "Connect the gallery's merge output. Disabled leaves every existing audio output unchanged and performs no additional save.",
+                }),
+            }
+        }
+
+    CATEGORY = "SECourses/audio"
+    RETURN_TYPES = ()
+    INPUT_IS_LIST = True
+    OUTPUT_NODE = True
+    FUNCTION = "merge"
+    DESCRIPTION = (
+        "Optionally concatenates generated MiniMax H3 folder-batch audio after the normal per-prompt Save Audio "
+        "node. Every prompt directory receives one lossless FLAC in output/audio beside the individual clips, "
+        "and only the complete last merged FLAC is previewed."
+    )
+
+    def merge(self, audio, references, merge_batch_audio):
+        if not any(bool(value) for value in merge_batch_audio):
+            return {}
+
+        groups = _batch_audio_merge_groups(audio, references)
+        if not groups:
+            print(
+                "[SECoursesBatchAudioMerge] Merge audio is enabled, but Folder batch is not active; skipping.",
+                flush=True,
+            )
+            return {}
+
+        saved = []
+        for group in groups:
+            result = _merge_batch_audio_group(group)
+            saved.append(result)
+            print(
+                f"[SECoursesBatchAudioMerge] merged {len(group['audios'])} audio clip(s) for "
+                f"folder '{group['folder']}' -> {result['fullpath']}",
+                flush=True,
+            )
+
+        preview = {
+            key: saved[-1][key]
+            for key in ("filename", "subfolder", "type")
+        }
+        return {"ui": {"audio": [preview]}}
 
 
 class SECoursesMiniMaxH3References:
@@ -1647,6 +1794,7 @@ class SECoursesTrimAudio:
 NODE_CLASS_MAPPINGS = {
     "SECoursesReferenceGallery": SECoursesReferenceGallery,
     "SECoursesBatchVideoMerge": SECoursesBatchVideoMerge,
+    "SECoursesBatchAudioMerge": SECoursesBatchAudioMerge,
     "SECoursesMiniMaxH3References": SECoursesMiniMaxH3References,
     "SECoursesMiniMaxH3ReferenceMode": SECoursesMiniMaxH3ReferenceMode,
     "SECoursesMiniMaxH3TextOnly": SECoursesMiniMaxH3TextOnly,
@@ -1657,6 +1805,7 @@ NODE_CLASS_MAPPINGS = {
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesReferenceGallery": "SECourses Reference Gallery (Images / Videos / Audio)",
     "SECoursesBatchVideoMerge": "Merge MiniMax H3 Folder Batch Videos",
+    "SECoursesBatchAudioMerge": "Merge MiniMax H3 Folder Batch Audio",
     "SECoursesMiniMaxH3References": "MiniMax H3 References (Gallery)",
     "SECoursesMiniMaxH3ReferenceMode": "MiniMax H3 Reference Mode",
     "SECoursesMiniMaxH3TextOnly": "MiniMax H3 Text Only (Gallery Prompt)",

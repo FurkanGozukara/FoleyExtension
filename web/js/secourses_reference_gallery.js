@@ -252,10 +252,10 @@ class ReferenceGalleryUI {
         const mergeTrack = document.createElement("span");
         mergeTrack.className = "secourses-refgal-mergetrack";
         mergeTrack.setAttribute("aria-hidden", "true");
-        const mergeLabel = document.createElement("span");
-        mergeLabel.className = "secourses-refgal-mergelabel";
-        mergeLabel.textContent = "Merge videos";
-        this.mergeToggle.append(this.mergeCheckbox, mergeTrack, mergeLabel);
+        this.mergeLabel = document.createElement("span");
+        this.mergeLabel.className = "secourses-refgal-mergelabel";
+        this.mergeLabel.textContent = "Merge videos";
+        this.mergeToggle.append(this.mergeCheckbox, mergeTrack, this.mergeLabel);
         this.batchRow.append(batchField, this.mergeToggle);
 
         this.fileInput = document.createElement("input");
@@ -464,6 +464,12 @@ class ReferenceGalleryUI {
             }
             this.node.setDirtyCanvas(true, true);
         });
+        this.mergeToggle.addEventListener("click", (event) => {
+            if (event.target === this.mergeCheckbox) return;
+            event.preventDefault();
+            this.mergeCheckbox.checked = !this.mergeCheckbox.checked;
+            this.mergeCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+        });
         this.fileInput.addEventListener("change", async () => {
             await this.addFiles([...this.fileInput.files]);
             this.fileInput.value = "";
@@ -564,6 +570,27 @@ class ReferenceGalleryUI {
     updateMergeAvailability() {
         const output = this.node.outputs?.find((item) => item.name === "merge_batch_videos");
         const available = Boolean(output?.links?.length);
+        const targetTypes = (output?.links ?? []).map((linkId) => {
+            const links = app.graph?.links;
+            const link = links?.[linkId] ?? links?.get?.(linkId);
+            const targetId = link?.target_id ?? link?.[3];
+            return app.graph?.getNodeById?.(targetId)?.type;
+        });
+        const hasAudio = targetTypes.includes("SECoursesBatchAudioMerge");
+        const hasVideo = targetTypes.includes("SECoursesBatchVideoMerge");
+        if (hasAudio && !hasVideo) {
+            this.mergeLabel.textContent = "Merge audio";
+            this.mergeCheckbox.setAttribute("aria-label", "Merge audio");
+            this.mergeToggle.title = "Also create one merged lossless FLAC for each prompt directory after saving every individual clip. Merged files stay in output/audio, and the complete last merged FLAC is previewed.";
+        } else if (hasAudio && hasVideo) {
+            this.mergeLabel.textContent = "Merge outputs";
+            this.mergeCheckbox.setAttribute("aria-label", "Merge outputs");
+            this.mergeToggle.title = "Also merge the generated video and audio outputs for each prompt directory after their individual files are saved.";
+        } else {
+            this.mergeLabel.textContent = "Merge videos";
+            this.mergeCheckbox.setAttribute("aria-label", "Merge videos");
+            this.mergeToggle.title = "Also create one merged MP4 for each prompt directory beside the individual clips in output/video. Existing per-prompt videos are unchanged, and the complete last merged MP4 is previewed.";
+        }
         this.mergeToggle.hidden = !available;
         this.mergeCheckbox.disabled = !available;
     }

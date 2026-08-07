@@ -33,13 +33,13 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   - Token aliases: `@img1`, `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`,
     and `@image#1` all work.
   - **Optional folder batch** uses a two-line, wrapping local-path field. The
-    adjacent *Merge videos* toggle leaves the normal per-prompt videos intact
-    and additionally concatenates videos from each prompt directory into one
-    MP4. A batch with no subfolders produces one root merge; batches with
+    adjacent merge toggle leaves the normal per-prompt outputs intact and
+    additionally concatenates each prompt directory. Video presets produce an
+    MP4 in `output/video`; the audio-only preset produces a lossless FLAC in
+    `output/audio`. A batch with no subfolders produces one root merge, while
     multiple prompt directories produce one merge per directory. Only the
-    final merged MP4 is shown in the merge node preview. Both individual and
-    merged outputs stay in `output/video`; nothing is written into the batch
-    input tree, where media files are treated as references. Prompt and media
+    complete final merge is previewed. Nothing is written into the batch input
+    tree, where media files are treated as references. Prompt and media
     filenames use Windows-style natural ordering (`1`, `2`, `10`) on Windows
     and Linux alike; that order assigns `@image1`, `@image2`, and the other
     numbered reference slots.
@@ -79,6 +79,11 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   used by the video presets. It groups generated videos using the gallery's
   validated batch metadata and saves flat `MiniMax_H3_Merged_*.mp4` files in
   `output/video`, beside the individual generations saved by Save Video.
+
+- **Merge MiniMax H3 Folder Batch Audio** is the corresponding audio-only
+  companion. It losslessly concatenates generated waveforms after Save Audio
+  writes the individual clips, then saves flat `MiniMax_H3_Audio_Merged_*.flac`
+  files in `output/audio` and previews the complete final merge.
 
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.
