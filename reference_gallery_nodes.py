@@ -18,6 +18,9 @@ Two nodes cooperate to replace banks of LoadImage / LoadVideo / LoadAudio nodes:
 - ``SECoursesBatchAudioMerge`` does the same for the audio-only preset,
   concatenating lossless waveform data and saving one FLAC per directory after
   the individual audio clips have been saved.
+- ``SECoursesBatchAudioSaveMerge`` is the audio preset's single result node: it
+  saves every individual FLAC, optionally creates the directory merges, and
+  returns only the final complete merge to ComfyUI's player when enabled.
 
 Future reference-driven models only need another thin adapter node; the
 gallery, its UI, and the ``@`` token grammar stay identical.
@@ -572,28 +575,32 @@ def _concatenate_batch_audio(audios):
     return merged
 
 
-def _merge_batch_audio_group(group):
+def _save_audio_output(audio, filename_prefix):
     import folder_paths
     from comfy_api.latest import io as comfy_io
     from comfy_api.latest import ui
 
-    merged = _concatenate_batch_audio(group["audios"])
-    prefix = _merge_audio_output_prefix(group["root"], group["folder"])
     saved = ui.AudioSaveHelper.save_audio(
-        merged,
-        filename_prefix=prefix,
+        audio,
+        filename_prefix=filename_prefix,
         folder_type=comfy_io.FolderType.output,
         cls=None,
         format="flac",
     )
     if not saved:
-        raise RuntimeError("Folder batch audio merge did not save a FLAC output.")
+        raise RuntimeError("MiniMax H3 audio output did not save a FLAC file.")
     result = dict(saved[-1])
     result["format"] = "audio/flac"
     result["fullpath"] = str(
         Path(folder_paths.get_output_directory()) / result["subfolder"] / result["filename"]
     )
     return result
+
+
+def _merge_batch_audio_group(group):
+    merged = _concatenate_batch_audio(group["audios"])
+    prefix = _merge_audio_output_prefix(group["root"], group["folder"])
+    return _save_audio_output(merged, prefix)
 
 
 def _resolve_reference_entry(entry):
@@ -1460,6 +1467,81 @@ class SECoursesBatchAudioMerge:
         return {"ui": {"audio": [preview]}}
 
 
+class SECoursesBatchAudioSaveMerge:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO", {
+                    "tooltip": "Generated audio clips. Every clip is saved individually before any optional folder merge.",
+                }),
+                "references": (REF_PACK_TYPE, {
+                    "tooltip": "Folder and prompt-order metadata from SECourses Reference Gallery.",
+                }),
+                "merge_batch_audio": ("BOOLEAN", {
+                    "tooltip": "Connect the gallery's merge output. Enabled returns only the complete last merged FLAC to ComfyUI while retaining every individual file.",
+                }),
+                "filename_prefix": ("STRING", {
+                    "default": "audio/MiniMax_H3_Audio_Only",
+                    "tooltip": "Output prefix for the individual lossless FLAC files.",
+                }),
+            }
+        }
+
+    CATEGORY = "SECourses/audio"
+    RETURN_TYPES = ()
+    INPUT_IS_LIST = True
+    OUTPUT_NODE = True
+    FUNCTION = "save_and_merge"
+    DESCRIPTION = (
+        "Saves every generated MiniMax H3 audio clip as an individual lossless FLAC. When folder merging is "
+        "enabled, it additionally saves one merged FLAC per prompt directory and returns only the complete "
+        "last merged file to ComfyUI's audio player."
+    )
+
+    def save_and_merge(self, audio, references, merge_batch_audio, filename_prefix):
+        if not audio:
+            raise ValueError("MiniMax H3 audio output received no audio clips to save.")
+
+        prefix = str(filename_prefix[0] if filename_prefix else "").strip()
+        if not prefix:
+            prefix = "audio/MiniMax_H3_Audio_Only"
+
+        individual_saved = []
+        for clip in audio:
+            result = _save_audio_output(clip, prefix)
+            individual_saved.append(result)
+            print(
+                f"[SECoursesBatchAudioSaveMerge] saved individual audio -> {result['fullpath']}",
+                flush=True,
+            )
+
+        merged_saved = []
+        if any(bool(value) for value in merge_batch_audio):
+            groups = _batch_audio_merge_groups(audio, references)
+            if not groups:
+                print(
+                    "[SECoursesBatchAudioSaveMerge] Merge audio is enabled, but Folder batch is not active; "
+                    "returning the individual audio output.",
+                    flush=True,
+                )
+            for group in groups:
+                result = _merge_batch_audio_group(group)
+                merged_saved.append(result)
+                print(
+                    f"[SECoursesBatchAudioSaveMerge] merged {len(group['audios'])} audio clip(s) for "
+                    f"folder '{group['folder']}' -> {result['fullpath']}",
+                    flush=True,
+                )
+
+        displayed = [merged_saved[-1]] if merged_saved else individual_saved
+        preview = [
+            {key: result[key] for key in ("filename", "subfolder", "type")}
+            for result in displayed
+        ]
+        return {"ui": {"audio": preview}}
+
+
 class SECoursesMiniMaxH3References:
     MAX_IMAGES = 9
     MAX_VIDEOS = 3
@@ -1795,6 +1877,7 @@ NODE_CLASS_MAPPINGS = {
     "SECoursesReferenceGallery": SECoursesReferenceGallery,
     "SECoursesBatchVideoMerge": SECoursesBatchVideoMerge,
     "SECoursesBatchAudioMerge": SECoursesBatchAudioMerge,
+    "SECoursesBatchAudioSaveMerge": SECoursesBatchAudioSaveMerge,
     "SECoursesMiniMaxH3References": SECoursesMiniMaxH3References,
     "SECoursesMiniMaxH3ReferenceMode": SECoursesMiniMaxH3ReferenceMode,
     "SECoursesMiniMaxH3TextOnly": SECoursesMiniMaxH3TextOnly,
@@ -1806,6 +1889,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesReferenceGallery": "SECourses Reference Gallery (Images / Videos / Audio)",
     "SECoursesBatchVideoMerge": "Merge MiniMax H3 Folder Batch Videos",
     "SECoursesBatchAudioMerge": "Merge MiniMax H3 Folder Batch Audio",
+    "SECoursesBatchAudioSaveMerge": "Save + Merge MiniMax H3 Folder Batch Audio",
     "SECoursesMiniMaxH3References": "MiniMax H3 References (Gallery)",
     "SECoursesMiniMaxH3ReferenceMode": "MiniMax H3 Reference Mode",
     "SECoursesMiniMaxH3TextOnly": "MiniMax H3 Text Only (Gallery Prompt)",

@@ -103,6 +103,67 @@ class BatchAudioMergeTests(unittest.TestCase):
         self.assertEqual(result, {})
         merge.assert_not_called()
 
+    def test_combined_output_saves_individuals_but_returns_only_last_merge(self):
+        packs = [
+            {"batch": {"root": "C:/batch", "folder": "a", "index": 1}},
+            {"batch": {"root": "C:/batch", "folder": "b", "index": 2}},
+        ]
+
+        def fake_save(clip, prefix):
+            return {
+                "filename": f"{clip}.flac",
+                "subfolder": "audio",
+                "type": "output",
+                "fullpath": f"C:/output/{prefix}/{clip}.flac",
+            }
+
+        def fake_merge(group):
+            return {
+                "filename": f"merged_{group['folder']}.flac",
+                "subfolder": "audio",
+                "type": "output",
+                "fullpath": f"C:/output/audio/merged_{group['folder']}.flac",
+            }
+
+        with (
+            mock.patch.object(gallery, "_save_audio_output", side_effect=fake_save) as save,
+            mock.patch.object(gallery, "_merge_batch_audio_group", side_effect=fake_merge) as merge,
+        ):
+            result = gallery.SECoursesBatchAudioSaveMerge().save_and_merge(
+                ["clip_a", "clip_b"], packs, [True, True], ["audio/individual"]
+            )
+
+        self.assertEqual(save.call_count, 2)
+        self.assertEqual(merge.call_count, 2)
+        self.assertEqual(result["ui"]["audio"], [{
+            "filename": "merged_b.flac",
+            "subfolder": "audio",
+            "type": "output",
+        }])
+
+    def test_combined_output_returns_individuals_when_merge_is_disabled(self):
+        def fake_save(clip, prefix):
+            return {
+                "filename": f"{clip}.flac",
+                "subfolder": "audio",
+                "type": "output",
+                "fullpath": f"C:/output/{prefix}/{clip}.flac",
+            }
+
+        with (
+            mock.patch.object(gallery, "_save_audio_output", side_effect=fake_save),
+            mock.patch.object(gallery, "_merge_batch_audio_group") as merge,
+        ):
+            result = gallery.SECoursesBatchAudioSaveMerge().save_and_merge(
+                ["clip_a", "clip_b"], [{}, {}], [False], ["audio/individual"]
+            )
+
+        merge.assert_not_called()
+        self.assertEqual(
+            [item["filename"] for item in result["ui"]["audio"]],
+            ["clip_a.flac", "clip_b.flac"],
+        )
+
 
 if __name__ == "__main__":
     unittest.main()

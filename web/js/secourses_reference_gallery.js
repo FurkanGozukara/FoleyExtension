@@ -576,7 +576,9 @@ class ReferenceGalleryUI {
             const targetId = link?.target_id ?? link?.[3];
             return app.graph?.getNodeById?.(targetId)?.type;
         });
-        const hasAudio = targetTypes.includes("SECoursesBatchAudioMerge");
+        const hasAudio = targetTypes.some((type) =>
+            type === "SECoursesBatchAudioMerge" || type === "SECoursesBatchAudioSaveMerge"
+        );
         const hasVideo = targetTypes.includes("SECoursesBatchVideoMerge");
         if (hasAudio && !hasVideo) {
             this.mergeLabel.textContent = "Merge audio";

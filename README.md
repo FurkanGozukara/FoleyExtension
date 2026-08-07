@@ -80,10 +80,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   validated batch metadata and saves flat `MiniMax_H3_Merged_*.mp4` files in
   `output/video`, beside the individual generations saved by Save Video.
 
-- **Merge MiniMax H3 Folder Batch Audio** is the corresponding audio-only
-  companion. It losslessly concatenates generated waveforms after Save Audio
-  writes the individual clips, then saves flat `MiniMax_H3_Audio_Merged_*.flac`
-  files in `output/audio` and previews the complete final merge.
+- **Save + Merge MiniMax H3 Folder Batch Audio** is the audio preset's single
+  result node. It saves all individual lossless FLACs, optionally writes flat
+  `MiniMax_H3_Audio_Merged_*.flac` files in `output/audio`, and returns only
+  the complete final merge to ComfyUI's player when merging is enabled. Using
+  one result node prevents an individual Save Audio preview from replacing the
+  merged playback result.
 
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.
