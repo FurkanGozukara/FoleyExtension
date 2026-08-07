@@ -187,11 +187,20 @@ def _resolve_reference_path(file):
 
 
 def _normalize_batch_folder(batch_folder):
-    raw = str(batch_folder or "").strip().strip('"')
+    raw = str(batch_folder or "").strip()
+    # unwrap Explorer "Copy as path" / shell quoting, including nested whitespace
+    while len(raw) >= 2 and raw[0] == raw[-1] and raw[0] in "'\"":
+        raw = raw[1:-1].strip()
     if not raw:
         return None
     expanded = os.path.expandvars(os.path.expanduser(raw))
-    folder = Path(expanded).resolve()
+    folder = Path(expanded)
+    if os.name != "nt" and "\\" in expanded and not folder.is_dir():
+        # windows-style separators or shell-escaped spaces pasted on posix
+        candidate = Path(expanded.replace("\\ ", " ").replace("\\", "/"))
+        if candidate.is_dir():
+            folder = candidate
+    folder = folder.resolve()
     if not folder.is_dir():
         raise ValueError(f"Folder batch path is not an existing directory: {folder}")
     return folder
