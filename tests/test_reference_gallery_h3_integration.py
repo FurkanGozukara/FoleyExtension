@@ -244,6 +244,94 @@ class NativeMiniMaxH3IntegrationTests(unittest.TestCase):
         self.assertEqual(latent, {"samples": "test"})
         self.assertEqual(len(conditioning), 1)
 
+    def test_audio_only_mode_uses_video_soundtrack_without_video_frames(self):
+        import torch
+
+        sys.path.insert(0, str(COMFY_ROOT))
+        import comfy_extras.nodes_minimax_h3 as native_h3
+
+        class FakeVideoVAE:
+            def __init__(self):
+                self.encoded_shapes = []
+
+            def encode(self, pixels):
+                self.encoded_shapes.append(tuple(pixels.shape))
+                return torch.zeros((1, 1, 2, 1, 1), dtype=torch.float32)
+
+        class FakeAudioVAE:
+            audio_sample_rate = 32000
+
+            def __init__(self):
+                self.encoded_shapes = []
+
+            def encode(self, waveform):
+                self.encoded_shapes.append(tuple(waveform.shape))
+                return torch.zeros((1, 32, 2, 8), dtype=torch.float32)
+
+        class FakeClip:
+            def __init__(self):
+                self.prompt = None
+                self.item_types = None
+
+            def tokenize(self, prompt, minimax_ref_items):
+                self.prompt = prompt
+                self.item_types = [item["type"] for item in minimax_ref_items]
+                return {"tokens": []}
+
+            def encode_from_tokens_scheduled(self, _tokens):
+                return [[torch.zeros((1, 1, 1)), {}]]
+
+        fake_audio = {
+            "waveform": torch.zeros((1, 2, 32000), dtype=torch.float32),
+            "sample_rate": 32000,
+        }
+        pack = {
+            "version": 2,
+            "prompt": "Use @video1 for delivery and @audio1 for tone",
+            "video_fps": 24.0,
+            "max_seconds": 30.0,
+            "images": [],
+            "videos": [{"file": "reference_gallery/source.mp4", "name": "source.mp4"}],
+            "audios": [{"file": "reference_gallery/voice.wav", "name": "voice.wav"}],
+        }
+        clip = FakeClip()
+        video_vae = FakeVideoVAE()
+        audio_vae = FakeAudioVAE()
+        with (
+            mock.patch.object(gallery, "_resolve_reference_path", side_effect=lambda path: path),
+            mock.patch.object(gallery, "_video_metadata", return_value=(1920, 1080, True)),
+            mock.patch.object(gallery, "_decode_video_audio", return_value=fake_audio) as decode_video_audio,
+            mock.patch.object(gallery, "_load_reference_audio", return_value=fake_audio) as load_reference_audio,
+            mock.patch.object(
+                native_h3,
+                "_empty_av_latent",
+                side_effect=lambda _width, _height, length: (
+                    {"samples": "test"},
+                    gallery._aligned_frame_count(length),
+                ),
+            ),
+        ):
+            conditioning, latent = gallery.SECoursesMiniMaxH3References().encode(
+                clip=clip,
+                vae=video_vae,
+                audio_vae=audio_vae,
+                references=pack,
+                width=32,
+                height=32,
+                length=770,
+                ref_image_size="max",
+                audio_only_mode=True,
+            )
+
+        self.assertEqual(clip.prompt, "Use <Audio 1> for delivery and <Audio 2> for tone")
+        self.assertEqual(clip.item_types, ["audio", "audio"])
+        self.assertEqual(video_vae.encoded_shapes, [])
+        self.assertEqual(len(audio_vae.encoded_shapes), 2)
+        self.assertAlmostEqual(decode_video_audio.call_args.args[1], 30.0, delta=0.1)
+        self.assertEqual(load_reference_audio.call_args.args[1], 30.0)
+        self.assertEqual(latent, {"samples": "test"})
+        self.assertEqual(len(conditioning), 1)
+
 
 if __name__ == "__main__":
     unittest.main()

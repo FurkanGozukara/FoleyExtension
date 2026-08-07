@@ -19,11 +19,15 @@ gallery, its UI, and the ``@`` token grammar stay identical.
 
 from __future__ import annotations
 
+import base64
 import hashlib
+import io
 import json
 import math
+import os
 import re
 import warnings
+from pathlib import Path
 
 
 REF_PACK_TYPE = "SECOURSES_REF_PACK"
@@ -43,6 +47,14 @@ MIN_MEDIA_BUDGET = 16 * 1024 * 1024
 # VIDEO_FLOAT_BUDGET.
 VIDEO_DECODE_AREA_CAP = 768 * 1344
 HASH_CHUNK_SIZE = 1024 * 1024
+
+BATCH_PROMPT_EXTENSIONS = {".txt"}
+BATCH_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
+BATCH_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi"}
+BATCH_AUDIO_EXTENSIONS = {".wav", ".mp3", ".aac", ".ogg", ".flac", ".m4a", ".opus"}
+BATCH_MEDIA_EXTENSIONS = BATCH_IMAGE_EXTENSIONS | BATCH_VIDEO_EXTENSIONS | BATCH_AUDIO_EXTENSIONS
+BATCH_MAX_PROMPTS = 1000
+BATCH_MAX_PROMPT_BYTES = 1024 * 1024
 
 # One entry per '@' alias, canonicalized: @img2 == @image2, @pic1 == @picture1 == @image1.
 TOKEN_MATCHER = re.compile(
@@ -101,6 +113,42 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
     return "".join(pieces)
 
 
+def translate_audio_only_reference_tokens(prompt, image_count, video_count, audio_count):
+    """Translate video aliases to their extracted soundtracks for audio-only H3 runs."""
+    if not prompt or "@" not in prompt:
+        return prompt
+
+    pieces = []
+    last = 0
+    omitted = []
+    for match in TOKEN_MATCHER.finditer(prompt):
+        pieces.append(prompt[last:match.start()])
+        last = match.end()
+        kind = _CANONICAL_TYPE[match.group("type").lower()]
+        number = int(match.group("num"))
+        label, count, offset = {
+            "image": ("Picture", image_count, 0),
+            "video": ("Audio", video_count, 0),
+            "audio": ("Audio", audio_count, video_count),
+        }[kind]
+        if 1 <= number <= count:
+            pieces.append(f"<{label} {offset + number}>")
+            continue
+        omitted.append(match.group(0))
+        if last < len(prompt) and prompt[last] == " ":
+            last += 1
+        elif pieces and pieces[-1].endswith(" "):
+            pieces[-1] = pieces[-1][:-1]
+    pieces.append(prompt[last:])
+    if omitted:
+        print(
+            "[SECoursesMiniMaxH3References] ignoring prompt reference(s) with no matching attachment: "
+            + ", ".join(omitted),
+            flush=True,
+        )
+    return "".join(pieces)
+
+
 def _parse_manifest(references):
     """Parses the gallery JSON manifest into {'images': [...], 'videos': [...], 'audios': [...]}."""
     if not references or not str(references).strip():
@@ -136,6 +184,149 @@ def _resolve_reference_path(file):
 
     # get_annotated_filepath rejects path traversal outside the input directory.
     return folder_paths.get_annotated_filepath(file)
+
+
+def _normalize_batch_folder(batch_folder):
+    raw = str(batch_folder or "").strip().strip('"')
+    if not raw:
+        return None
+    expanded = os.path.expandvars(os.path.expanduser(raw))
+    folder = Path(expanded).resolve()
+    if not folder.is_dir():
+        raise ValueError(f"Folder batch path is not an existing directory: {folder}")
+    return folder
+
+
+def _batch_relevant_files(root):
+    relevant_extensions = BATCH_PROMPT_EXTENSIONS | BATCH_MEDIA_EXTENSIONS
+    try:
+        files = [
+            path
+            for path in root.rglob("*")
+            if path.is_file() and path.suffix.lower() in relevant_extensions
+        ]
+    except OSError as error:
+        raise ValueError(f"Could not scan folder batch path '{root}': {error}") from error
+    return sorted(files, key=lambda path: path.relative_to(root).as_posix().casefold())
+
+
+def _batch_media_entries(root, folder):
+    by_kind = {"images": [], "videos": [], "audios": []}
+    kinds = (
+        ("images", BATCH_IMAGE_EXTENSIONS),
+        ("videos", BATCH_VIDEO_EXTENSIONS),
+        ("audios", BATCH_AUDIO_EXTENSIONS),
+    )
+    try:
+        direct_files = sorted(
+            (path for path in folder.iterdir() if path.is_file()),
+            key=lambda path: path.name.casefold(),
+        )
+    except OSError as error:
+        raise ValueError(f"Could not inspect folder batch directory '{folder}': {error}") from error
+
+    root_string = str(root)
+    for path in direct_files:
+        extension = path.suffix.lower()
+        for key, supported in kinds:
+            if extension in supported:
+                by_kind[key].append({
+                    "path": str(path.resolve()),
+                    "name": path.name,
+                    "source": "batch_folder",
+                    "batch_root": root_string,
+                })
+                break
+    return by_kind
+
+
+def _read_batch_prompt(path):
+    try:
+        size = path.stat().st_size
+    except OSError as error:
+        raise ValueError(f"Could not inspect folder prompt '{path}': {error}") from error
+    if size > BATCH_MAX_PROMPT_BYTES:
+        raise ValueError(
+            f"Folder prompt '{path}' is {size / 1024:.1f} KiB; "
+            f"the safety limit is {BATCH_MAX_PROMPT_BYTES / 1024:.0f} KiB."
+        )
+    try:
+        return path.read_text(encoding="utf-8-sig")
+    except UnicodeDecodeError as error:
+        raise ValueError(f"Folder prompt '{path}' must be UTF-8 text: {error}") from error
+    except OSError as error:
+        raise ValueError(f"Could not read folder prompt '{path}': {error}") from error
+
+
+def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_seconds):
+    root = _normalize_batch_folder(batch_folder)
+    if root is None:
+        return None
+
+    prompt_files = [
+        path for path in _batch_relevant_files(root)
+        if path.suffix.lower() in BATCH_PROMPT_EXTENSIONS
+    ]
+    if not prompt_files:
+        raise ValueError(f"Folder batch path contains no .txt prompt files: {root}")
+    if len(prompt_files) > BATCH_MAX_PROMPTS:
+        raise ValueError(
+            f"Folder batch path contains {len(prompt_files)} prompt files; "
+            f"the safety limit is {BATCH_MAX_PROMPTS}."
+        )
+
+    folder_media = {}
+    packs = []
+    prompts = []
+    for index, prompt_path in enumerate(prompt_files, start=1):
+        folder = prompt_path.parent
+        if folder not in folder_media:
+            folder_media[folder] = _batch_media_entries(root, folder)
+        media = folder_media[folder]
+        media_count = sum(len(media[key]) for key in ("images", "videos", "audios"))
+        chosen = media if media_count else fallback_manifest
+        prompt = _read_batch_prompt(prompt_path)
+        relative_folder = folder.relative_to(root).as_posix()
+        if relative_folder == ".":
+            relative_folder = "root"
+        packs.append({
+            "version": 3,
+            "prompt": prompt,
+            "video_fps": float(video_fps),
+            "max_seconds": float(max_seconds),
+            "images": [dict(entry) for entry in chosen["images"]],
+            "videos": [dict(entry) for entry in chosen["videos"]],
+            "audios": [dict(entry) for entry in chosen["audios"]],
+            "batch": {
+                "root": str(root),
+                "folder": relative_folder,
+                "prompt_file": prompt_path.name,
+                "index": index,
+                "count": len(prompt_files),
+                "uses_folder_media": bool(media_count),
+            },
+        })
+        prompts.append(prompt)
+    return packs, prompts
+
+
+def _resolve_reference_entry(entry):
+    if entry.get("source") != "batch_folder":
+        return _resolve_reference_path(entry["file"])
+
+    root_value = entry.get("batch_root")
+    path_value = entry.get("path")
+    if not root_value or not path_value:
+        raise ValueError("Folder batch reference is missing its validated root or file path.")
+    root = Path(root_value).resolve()
+    path = Path(path_value).resolve()
+    try:
+        path.relative_to(root)
+    except ValueError as error:
+        raise ValueError(f"Folder batch reference escapes its selected root: {path}") from error
+    if not path.is_file():
+        raise ValueError(f"Folder batch reference file was not found: {path}")
+    return str(path)
 
 
 def _available_media_budget(maximum):
@@ -450,7 +641,7 @@ def _prepare_image_references(entries, width, height, ref_image_size, byte_budge
     specs = []
     requested_sizes = []
     for entry in entries:
-        path = _resolve_reference_path(entry["file"])
+        path = _resolve_reference_entry(entry)
         source_width, source_height, _orientation = _oriented_image_dimensions(path)
         target_width, target_height = _fit_dimensions(
             source_width,
@@ -481,7 +672,7 @@ def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=Non
 
     specs = []
     for entry in entries:
-        path = _resolve_reference_path(entry["file"])
+        path = _resolve_reference_entry(entry)
         source_width, source_height, has_audio = _video_metadata(path)
         target_size = None
         if source_width and source_height:
@@ -586,8 +777,36 @@ class _LazyAudioReferences:
 
     def values(self):
         for entry in self.entries:
-            path = _resolve_reference_path(entry["file"])
+            path = _resolve_reference_entry(entry)
             yield _load_reference_audio(path, self.max_seconds)
+
+
+class _LazyAudioOnlyReferences:
+    """Expose video soundtracks and audio files as one ordered audio reference set."""
+
+    def __init__(self, video_specs, audio_entries, max_seconds):
+        self.video_specs = video_specs
+        self.audio_entries = audio_entries
+        self.per_item_seconds = float(max_seconds)
+
+    def __len__(self):
+        return len(self.video_specs) + len(self.audio_entries)
+
+    def values(self):
+        for spec in self.video_specs:
+            audio = _decode_video_audio(
+                spec["path"],
+                min(float(spec["audio_seconds"]), self.per_item_seconds),
+            )
+            if audio is None:
+                raise ValueError(
+                    f"Reference video '{spec['name']}' has no usable soundtrack. "
+                    "Audio-only MiniMax H3 mode uses a video's audio stream, not its frames."
+                )
+            yield audio
+        for entry in self.audio_entries:
+            path = _resolve_reference_entry(entry)
+            yield _load_reference_audio(path, self.per_item_seconds)
 
 
 class SECoursesReferenceGallery:
@@ -611,30 +830,49 @@ class SECoursesReferenceGallery:
                     "tooltip": "Reference videos are resampled to this frame rate during model-aware decoding. MiniMax H3 expects 24.",
                 }),
                 "max_seconds": ("FLOAT", {
-                    "default": 15.0, "min": 1.0, "max": 60.0, "step": 0.5,
-                    "tooltip": "Reference videos and audio are trimmed to at most this many seconds. MiniMax H3 supports 2-15 second references; shorter references encode faster.",
+                    "default": 15.0, "min": 1.0, "max": 3600.0, "step": 0.5,
+                    "tooltip": "Maximum duration used from each reference. Clean 2-15 second clips are the quality-tested recommendation, but longer references are allowed; they use more memory/time and may be less reliable.",
+                }),
+                "batch_folder": ("STRING", {
+                    "default": "",
+                    "tooltip": "Optional local folder containing UTF-8 .txt prompts. Every prompt is processed in sorted order. Media beside each prompt is used as that prompt's references; when that folder has no media, the gallery attachments are used as fallback references. Subfolders are scanned recursively but never share media with each other.",
                 }),
             }
         }
 
     CATEGORY = "SECourses/references"
-    RETURN_TYPES = (REF_PACK_TYPE, "STRING")
-    RETURN_NAMES = ("references", "prompt")
+    RETURN_TYPES = (REF_PACK_TYPE, "STRING", "BOOLEAN")
+    RETURN_NAMES = ("references", "prompt", "folder_batch_active")
+    OUTPUT_IS_LIST = (True, True, True)
     OUTPUT_TOOLTIPS = (
         "Every gallery reference bundled in upload order, ready for a model adapter node such as 'MiniMax H3 References (Gallery)'.",
-        "The prompt exactly as typed, including '@' reference tokens.",
+        "The prompt exactly as typed, or one output per sorted .txt file when Folder batch is active.",
+        "True for folder-batch items and false for the normal single prompt.",
     )
     FUNCTION = "collect"
     DESCRIPTION = (
         "SwarmUI-style unified reference uploader: add images, videos, and audio next to the prompt and mention "
         "them as '@image1', '@video1', or '@audio1'. Video soundtracks are paired automatically. Feed the "
         "references output into a model adapter node (eg 'MiniMax H3 References (Gallery)'). Media stays lazy "
-        "until the adapter can apply its canvas, duration, and memory limits."
+        "until the adapter can apply its canvas, duration, and memory limits. An optional folder path emits one "
+        "item per recursively discovered .txt prompt, using only media in that prompt's own directory and falling "
+        "back to the gallery attachments when the directory has no media."
     )
 
-    def collect(self, prompt, references, video_fps, max_seconds):
+    def collect(self, prompt, references, video_fps, max_seconds, batch_folder=""):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
+        folder_batch = _collect_folder_batch(batch_folder, manifest, video_fps, max_seconds)
+        if folder_batch is not None:
+            packs, prompts = folder_batch
+            folders = len({pack["batch"]["folder"] for pack in packs})
+            print(
+                f"[SECoursesReferenceGallery] prepared {len(packs)} folder prompt(s) "
+                f"across {folders} unique folder(s)",
+                flush=True,
+            )
+            return (packs, prompts, [True] * len(packs))
+
         pack = {
             "version": 2,
             "prompt": prompt,
@@ -649,12 +887,28 @@ class SECoursesReferenceGallery:
             (("image(s)", pack["images"]), ("video(s)", pack["videos"]), ("audio", pack["audios"]))
         )
         print(f"[SECoursesReferenceGallery] prepared {summary} for target-aware decoding", flush=True)
-        return (pack, prompt)
+        return ([pack], [prompt], [False])
 
     @classmethod
-    def IS_CHANGED(cls, prompt, references, video_fps, max_seconds):
+    def IS_CHANGED(cls, prompt, references, video_fps, max_seconds, batch_folder=""):
         digest = hashlib.sha256()
-        digest.update(repr((prompt, references, float(video_fps), float(max_seconds))).encode("utf-8"))
+        digest.update(
+            repr((prompt, references, float(video_fps), float(max_seconds), str(batch_folder))).encode("utf-8")
+        )
+        try:
+            root = _normalize_batch_folder(batch_folder)
+        except ValueError:
+            return float("nan")
+        if root is not None:
+            try:
+                for path in _batch_relevant_files(root):
+                    stat = path.stat()
+                    digest.update(path.relative_to(root).as_posix().encode("utf-8"))
+                    digest.update(repr((stat.st_size, stat.st_mtime_ns)).encode("ascii"))
+            except (OSError, ValueError):
+                return float("nan")
+            return digest.hexdigest()
+
         try:
             manifest = _parse_manifest(references)
         except ValueError:
@@ -671,15 +925,32 @@ class SECoursesReferenceGallery:
         return digest.hexdigest()
 
     @classmethod
-    def VALIDATE_INPUTS(cls, references):
-        import folder_paths
-
+    def VALIDATE_INPUTS(cls, references, batch_folder=""):
         try:
             manifest = _parse_manifest(references)
         except ValueError as error:
             return str(error)
+        try:
+            root = _normalize_batch_folder(batch_folder)
+            if root is not None:
+                prompt_files = [
+                    path for path in _batch_relevant_files(root)
+                    if path.suffix.lower() in BATCH_PROMPT_EXTENSIONS
+                ]
+                if not prompt_files:
+                    return f"Folder batch path contains no .txt prompt files: {root}"
+                if len(prompt_files) > BATCH_MAX_PROMPTS:
+                    return (
+                        f"Folder batch path contains {len(prompt_files)} prompt files; "
+                        f"the safety limit is {BATCH_MAX_PROMPTS}."
+                    )
+        except ValueError as error:
+            return str(error)
+        folder_paths = None
         for kind in ("images", "videos", "audios"):
             for entry in manifest[kind]:
+                if folder_paths is None:
+                    import folder_paths
                 if not folder_paths.exists_annotated_filepath(entry["file"]):
                     return f"Reference file not found: {entry['file']}. Re-add it in the gallery."
         return True
@@ -707,7 +978,7 @@ class SECoursesMiniMaxH3References:
                 "height": ("INT", {"default": 768, "min": 32, "max": max_resolution, "step": 32}),
                 "length": ("INT", {
                     "default": 124, "min": 5, "max": 3600, "step": 17,
-                    "tooltip": "Frame count at 24 fps, snapped up to the model's 17k+5 grid (124 = ~5s; trained range is ~124-362).",
+                    "tooltip": "Frame count at 24 fps, snapped up to the model's 17k+5 grid (124 = ~5s; ~4-15 seconds is quality-tested, and longer generation is allowed but experimental).",
                 }),
                 "ref_image_size": (["match", "max"], {
                     "default": "match",
@@ -718,6 +989,12 @@ class SECoursesMiniMaxH3References:
                 "prompt_override": ("STRING", {
                     "forceInput": True,
                     "tooltip": "Optional external prompt. When connected and non-empty it replaces the gallery prompt; '@' reference tokens work here too.",
+                }),
+                "audio_only_mode": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "AUDIO ONLY: extract video soundtracks",
+                    "label_off": "FULL REFERENCES: keep video frames",
+                    "tooltip": "For audio-only output, omit reference-video frames and use only their soundtracks. @video1 becomes the corresponding <Audio 1> reference, preserving 32x32 speed.",
                 }),
             },
         }
@@ -733,7 +1010,8 @@ class SECoursesMiniMaxH3References:
         "is decoded lazily into an aspect-preserving, memory-bounded canvas."
     )
 
-    def encode(self, clip, vae, audio_vae, references, width, height, length, ref_image_size, prompt_override=None):
+    def encode(self, clip, vae, audio_vae, references, width, height, length, ref_image_size,
+               prompt_override=None, audio_only_mode=False):
         try:
             from comfy_extras.nodes_minimax_h3 import MiniMaxH3ReferenceToVideo
         except ImportError:
@@ -763,10 +1041,22 @@ class SECoursesMiniMaxH3References:
             image_specs = _prepare_image_references(images, width, height, ref_image_size)
             video_specs = _prepare_video_references(videos, fps, max_seconds, length)
             ref_images = _LazyImageReferences(image_specs)
-            ref_videos = _LazyVideoReferences(video_specs, fps)
-            ref_video_audios = _LazyVideoAudioReferences(video_specs)
-            ref_audios = _LazyAudioReferences(audios, max_seconds)
-            videos_with_audio = len(ref_video_audios)
+            if audio_only_mode:
+                missing_audio = [spec["name"] for spec in video_specs if not spec["has_audio"]]
+                if missing_audio:
+                    raise ValueError(
+                        "Audio-only MiniMax H3 mode received reference video(s) without a soundtrack: "
+                        + ", ".join(missing_audio)
+                    )
+                ref_videos = None
+                ref_video_audios = None
+                ref_audios = _LazyAudioOnlyReferences(video_specs, audios, max_seconds)
+                videos_with_audio = len(video_specs)
+            else:
+                ref_videos = _LazyVideoReferences(video_specs, fps)
+                ref_video_audios = _LazyVideoAudioReferences(video_specs)
+                ref_audios = _LazyAudioReferences(audios, max_seconds)
+                videos_with_audio = len(ref_video_audios)
         else:
             # Compatibility with in-memory packs produced before descriptor packs v2.
             ref_images = {
@@ -792,13 +1082,39 @@ class SECoursesMiniMaxH3References:
                 if video.get("audio") is not None:
                     ref_video_audios[f"ref_video_audio_{index}"] = video["audio"]
 
-            ref_audios = {
-                f"ref_audio_{index}": audio["audio"]
-                for index, audio in enumerate(audios)
-            }
-            videos_with_audio = len(ref_video_audios)
+            if audio_only_mode:
+                missing_audio = [
+                    video.get("name", "?") for video in videos if video.get("audio") is None
+                ]
+                if missing_audio:
+                    raise ValueError(
+                        "Audio-only MiniMax H3 mode received reference video(s) without a soundtrack: "
+                        + ", ".join(missing_audio)
+                    )
+                merged_audio = [video["audio"] for video in videos]
+                merged_audio.extend(audio["audio"] for audio in audios)
+                ref_videos = {}
+                ref_video_audios = {}
+                ref_audios = {
+                    f"ref_audio_{index}": audio
+                    for index, audio in enumerate(merged_audio)
+                }
+                videos_with_audio = len(videos)
+            else:
+                ref_audios = {
+                    f"ref_audio_{index}": audio["audio"]
+                    for index, audio in enumerate(audios)
+                }
+                videos_with_audio = len(ref_video_audios)
 
-        translated = translate_reference_tokens(prompt, len(images), len(videos), len(audios), videos_with_audio)
+        if audio_only_mode:
+            translated = translate_audio_only_reference_tokens(
+                prompt, len(images), videos_with_audio, len(audios)
+            )
+        else:
+            translated = translate_reference_tokens(
+                prompt, len(images), len(videos), len(audios), videos_with_audio
+            )
 
         if translated != prompt:
             print(f"[SECoursesMiniMaxH3References] prompt for the model: {translated}", flush=True)
@@ -812,12 +1128,171 @@ class SECoursesMiniMaxH3References:
         return (conditioning, latent)
 
 
+class SECoursesMiniMaxH3ReferenceMode:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "references": (REF_PACK_TYPE, {
+                    "tooltip": "Reference pack from SECourses Reference Gallery."
+                }),
+            }
+        }
+
+    CATEGORY = "SECourses/references"
+    RETURN_TYPES = ("BOOLEAN",)
+    RETURN_NAMES = ("has_references",)
+    FUNCTION = "detect"
+    DESCRIPTION = "Selects MiniMax H3 Ref2VA only when the current prompt actually has media references."
+
+    def detect(self, references):
+        if not isinstance(references, dict):
+            raise ValueError("The references input must come from a SECourses Reference Gallery node.")
+        return (any(references.get(kind) for kind in ("images", "videos", "audios")),)
+
+
+class SECoursesMiniMaxH3TextOnly:
+    @classmethod
+    def INPUT_TYPES(cls):
+        try:
+            import nodes
+            max_resolution = nodes.MAX_RESOLUTION
+        except ImportError:
+            max_resolution = 16384
+        return {
+            "required": {
+                "clip": ("CLIP", {"tooltip": "MiniMax H3 text/vision encoder (Qwen3-VL-32B)."}),
+                "vae": ("VAE", {"tooltip": "MiniMax H3 video VAE."}),
+                "references": (REF_PACK_TYPE, {"tooltip": "Prompt pack from SECourses Reference Gallery."}),
+                "width": ("INT", {"default": 32, "min": 32, "max": max_resolution, "step": 32}),
+                "height": ("INT", {"default": 32, "min": 32, "max": max_resolution, "step": 32}),
+                "length": ("INT", {
+                    "default": 124, "min": 5, "max": 3600, "step": 17,
+                    "tooltip": "Frame count at 24 fps, snapped up to the model's 17k+5 grid. Longer than 15 seconds is allowed but remains experimental.",
+                }),
+            },
+            "optional": {
+                "prompt_override": ("STRING", {
+                    "forceInput": True,
+                    "tooltip": "Optional external prompt that replaces the gallery prompt.",
+                }),
+            },
+        }
+
+    CATEGORY = "SECourses/references"
+    RETURN_TYPES = ("CONDITIONING", "LATENT")
+    RETURN_NAMES = ("positive", "latent")
+    FUNCTION = "encode"
+    DESCRIPTION = "Uses MiniMax H3's FL2VA checkpoint for text-only audio generation."
+
+    def encode(self, clip, vae, references, width, height, length, prompt_override=None):
+        try:
+            from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo
+        except ImportError:
+            raise RuntimeError(
+                "MiniMax H3 nodes were not found. Update ComfyUI to a version that ships comfy_extras/nodes_minimax_h3.py."
+            )
+        if not isinstance(references, dict):
+            raise ValueError("The references input must come from a SECourses Reference Gallery node.")
+        prompt = references.get("prompt") or ""
+        if prompt_override is not None and str(prompt_override).strip():
+            prompt = str(prompt_override)
+        prompt = translate_reference_tokens(prompt, 0, 0, 0, 0)
+        output = MiniMaxH3ImageToVideo.execute(
+            clip=clip,
+            vae=vae,
+            prompt=prompt,
+            width=width,
+            height=height,
+            length=length,
+        )
+        return (output.args[0], output.args[1])
+
+
+class SECoursesLoadVideoAudioB64:
+    """Decode only a base64 video's soundtrack, without materializing its frames."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video_base64": ("STRING", {"multiline": True}),
+                "max_seconds": ("FLOAT", {
+                    "default": 15.0, "min": 1.0, "max": 3600.0, "step": 0.5,
+                    "tooltip": "Maximum soundtrack duration to decode. Clean 2-15 second references are recommended; longer references are allowed.",
+                }),
+            }
+        }
+
+    CATEGORY = "SECourses/references"
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "load"
+    DESCRIPTION = "Extracts a video's soundtrack directly from base64 data without decoding any video frames."
+
+    def load(self, video_base64, max_seconds):
+        payload = str(video_base64).strip()
+        if payload.startswith("data:") and "," in payload:
+            payload = payload.split(",", 1)[1]
+        try:
+            video_bytes = base64.b64decode(payload)
+        except (ValueError, TypeError) as error:
+            raise ValueError("Reference video contains invalid base64 data.") from error
+        if not video_bytes:
+            raise ValueError("Reference video is empty.")
+        audio = _decode_video_audio(io.BytesIO(video_bytes), max(1.0, float(max_seconds)))
+        if audio is None:
+            raise ValueError(
+                "Reference video has no usable soundtrack. Audio-only MiniMax H3 mode does not use its frames."
+            )
+        return (audio,)
+
+
+class SECoursesTrimAudio:
+    """Trim an AUDIO value to a user-selected duration without imposing a model policy cap."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "audio": ("AUDIO",),
+                "max_seconds": ("FLOAT", {
+                    "default": 15.0, "min": 1.0, "max": 3600.0, "step": 0.5,
+                    "tooltip": "Maximum duration used from this reference. Values above 15 seconds are allowed but experimental for MiniMax H3.",
+                }),
+            }
+        }
+
+    CATEGORY = "SECourses/references"
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
+    FUNCTION = "trim"
+    DESCRIPTION = "Trims a ComfyUI AUDIO value to the selected maximum duration."
+
+    def trim(self, audio, max_seconds):
+        if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
+            raise ValueError("SECourses Trim Audio requires a valid ComfyUI AUDIO input.")
+        sample_rate = int(audio["sample_rate"])
+        max_samples = max(1, round(max(1.0, float(max_seconds)) * sample_rate))
+        trimmed = dict(audio)
+        trimmed["waveform"] = audio["waveform"][..., :max_samples]
+        return (trimmed,)
+
+
 NODE_CLASS_MAPPINGS = {
     "SECoursesReferenceGallery": SECoursesReferenceGallery,
     "SECoursesMiniMaxH3References": SECoursesMiniMaxH3References,
+    "SECoursesMiniMaxH3ReferenceMode": SECoursesMiniMaxH3ReferenceMode,
+    "SECoursesMiniMaxH3TextOnly": SECoursesMiniMaxH3TextOnly,
+    "SECoursesLoadVideoAudioB64": SECoursesLoadVideoAudioB64,
+    "SECoursesTrimAudio": SECoursesTrimAudio,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesReferenceGallery": "SECourses Reference Gallery (Images / Videos / Audio)",
     "SECoursesMiniMaxH3References": "MiniMax H3 References (Gallery)",
+    "SECoursesMiniMaxH3ReferenceMode": "MiniMax H3 Reference Mode",
+    "SECoursesMiniMaxH3TextOnly": "MiniMax H3 Text Only (Gallery Prompt)",
+    "SECoursesLoadVideoAudioB64": "Load Video Soundtrack (Base64, No Frames)",
+    "SECoursesTrimAudio": "Trim Reference Audio",
 }

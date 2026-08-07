@@ -20,7 +20,9 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   `/upload/image` endpoint into `input/reference_gallery/`.
   - Up to 9 images, 3 videos, 3 audio files.
   - Videos are resampled to `video_fps` (24 for MiniMax H3), trimmed to
-    `max_seconds`, and their soundtrack is paired automatically.
+    `max_seconds`, and their soundtrack is paired automatically. The default
+    is 15 seconds because clean 2-15 second references are quality-tested, but
+    this is guidance rather than a hard cap; longer values are accepted.
   - Large media is decoded only after the adapter knows the required canvas
     and duration. Images are downscaled before float conversion; video frames
     are scaled during FFmpeg decode and trimmed to the usable H3 frame count.
@@ -36,7 +38,16 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   automatically) and then runs ComfyUI's native `MiniMaxH3ReferenceToVideo`
   conditioning, so upstream improvements apply automatically. Outputs
   `positive` conditioning plus the AV latent. Legacy `<Picture 1>` labels typed
-  directly still pass through unchanged.
+  directly still pass through unchanged. Its audio-only mode extracts each
+  reference video's soundtrack without decoding or conditioning on the video
+  frames; in that mode `@video1` maps to `<Audio 1>`.
+- **Load Video Soundtrack (Base64, No Frames)** and **Trim Reference Audio**
+  provide the same soundtrack-only, user-controlled reference duration path
+  to the SwarmUI extension. No hidden aggregate 15-second limit is applied.
+- **MiniMax H3 Reference Mode** and **MiniMax H3 Text Only (Gallery Prompt)**
+  let one workflow choose the task-specific checkpoint lazily: FL2VA when the
+  current prompt has no media and Ref2VA when it does. This also works per item
+  in recursive folder batches.
 
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.

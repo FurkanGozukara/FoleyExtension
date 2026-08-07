@@ -203,6 +203,33 @@ class ReferenceGalleryMediaSafetyTests(unittest.TestCase):
         self.assertEqual(tuple(audio["waveform"].shape), (1, 2, sample_rate))
         self.assertEqual(audio["waveform"].dtype, torch.float32)
 
+    def test_base64_video_soundtrack_loader_respects_longer_user_limit(self):
+        import base64
+
+        expected = {"waveform": object(), "sample_rate": 32000}
+        with mock.patch.object(gallery, "_decode_video_audio", return_value=expected) as decode:
+            output, = gallery.SECoursesLoadVideoAudioB64().load(
+                base64.b64encode(b"fake-container").decode("ascii"),
+                max_seconds=42.0,
+            )
+
+        self.assertIs(output, expected)
+        stream, max_seconds = decode.call_args.args
+        self.assertEqual(stream.getvalue(), b"fake-container")
+        self.assertEqual(max_seconds, 42.0)
+
+    def test_trim_audio_allows_limits_above_fifteen_seconds(self):
+        import torch
+
+        audio = {
+            "waveform": torch.zeros((1, 2, 400), dtype=torch.float32),
+            "sample_rate": 10,
+        }
+        trimmed, = gallery.SECoursesTrimAudio().trim(audio, max_seconds=30.0)
+
+        self.assertEqual(trimmed["waveform"].shape[-1], 300)
+        self.assertEqual(audio["waveform"].shape[-1], 400)
+
     def test_gallery_pack_keeps_descriptors_and_prompt_without_decoding(self):
         manifest = json.dumps({
             "images": [{"file": "reference_gallery/large.jpg", "name": "large.jpg"}],
@@ -214,11 +241,13 @@ class ReferenceGalleryMediaSafetyTests(unittest.TestCase):
             mock.patch.object(gallery, "_load_reference_image", side_effect=AssertionError("eager image decode")),
             mock.patch.object(gallery, "_decode_video_frames", side_effect=AssertionError("eager video decode")),
         ):
-            pack, prompt = node.collect("keep @image1 and @video1", manifest, 24, 15)
+            packs, prompts, active = node.collect("keep @image1 and @video1", manifest, 24, 15)
 
+        pack = packs[0]
         self.assertEqual(pack["version"], 2)
         self.assertEqual(pack["prompt"], "keep @image1 and @video1")
-        self.assertEqual(prompt, "keep @image1 and @video1")
+        self.assertEqual(prompts, ["keep @image1 and @video1"])
+        self.assertEqual(active, [False])
         self.assertNotIn("pixels", pack["images"][0])
         self.assertNotIn("frames", pack["videos"][0])
 
