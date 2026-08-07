@@ -181,6 +181,252 @@ audio.secourses-refgal-media {
     white-space: nowrap;
 }
 
+.secourses-refgal-trimbadge {
+    background: rgba(23, 60, 102, 0.85);
+    border-radius: 4px;
+    color: #74c0fc;
+    font-size: 9px;
+    font-weight: 700;
+    left: 3px;
+    padding: 1px 4px;
+    position: absolute;
+    top: 3px;
+    white-space: nowrap;
+    z-index: 2;
+}
+
+/* ==================== Optional trim loader ==================== */
+
+.secourses-refgal-trimtoggle-active {
+    border-color: #7d5698;
+    box-shadow: 0 0 0 1px rgba(125, 86, 152, 0.55);
+    color: #fff;
+}
+
+.secourses-refgal-loader {
+    background: color-mix(in srgb, var(--refgal-bg) 90%, #7d5698);
+    border: 1px solid color-mix(in srgb, #7d5698 45%, var(--refgal-border));
+    border-radius: 6px;
+    display: flex;
+    flex: 0 0 auto;
+    flex-direction: column;
+    gap: 6px;
+    padding: 6px 8px;
+}
+
+.secourses-refgal-loader-head {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+}
+
+.secourses-refgal-loader-title {
+    color: color-mix(in srgb, var(--refgal-fg) 92%, transparent);
+    font-size: 11px;
+    font-weight: 700;
+    white-space: nowrap;
+}
+
+.secourses-refgal-loader-hint {
+    color: color-mix(in srgb, var(--refgal-fg) 55%, transparent);
+    font-size: 10px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.secourses-refgal-loader-close {
+    background: transparent;
+    border: none;
+    border-radius: 4px;
+    color: color-mix(in srgb, var(--refgal-fg) 70%, transparent);
+    cursor: pointer;
+    font-size: 14px;
+    height: 20px;
+    line-height: 1;
+    margin-left: auto;
+    width: 20px;
+}
+
+.secourses-refgal-loader-close:hover {
+    background: #c92a2a;
+    color: #fff;
+}
+
+.secourses-refgal-loader-pickrow {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+    min-width: 0;
+}
+
+.secourses-refgal-loader-file {
+    color: color-mix(in srgb, var(--refgal-fg) 75%, transparent);
+    font-size: 11px;
+    overflow: hidden;
+    text-overflow: ellipsis;
+    white-space: nowrap;
+}
+
+.secourses-refgal-loader-preview {
+    background: rgba(0, 0, 0, 0.35);
+    border-radius: 6px;
+    display: flex;
+    justify-content: center;
+    padding: 4px;
+}
+
+.secourses-refgal-loader-media-video {
+    background: #000;
+    border-radius: 4px;
+    max-height: 150px;
+    max-width: 100%;
+}
+
+.secourses-refgal-loader-media-audio {
+    height: 34px;
+    width: 100%;
+}
+
+.secourses-refgal-trimbody {
+    display: flex;
+    flex-direction: column;
+    gap: 6px;
+}
+
+.secourses-refgal-trim-track {
+    background: rgba(0, 0, 0, 0.45);
+    border: 1px solid var(--refgal-border);
+    border-radius: 5px;
+    cursor: pointer;
+    height: 24px;
+    position: relative;
+    touch-action: none;
+}
+
+.secourses-refgal-trim-fill {
+    background: rgba(77, 171, 247, 0.35);
+    border-top: 1px solid rgba(77, 171, 247, 0.8);
+    border-bottom: 1px solid rgba(77, 171, 247, 0.8);
+    bottom: 0;
+    position: absolute;
+    top: 0;
+}
+
+.secourses-refgal-trim-playhead {
+    background: #ffd43b;
+    bottom: 1px;
+    pointer-events: none;
+    position: absolute;
+    top: 1px;
+    width: 2px;
+    z-index: 2;
+}
+
+.secourses-refgal-trim-handle {
+    background: #4dabf7;
+    border-radius: 4px;
+    bottom: -3px;
+    cursor: ew-resize;
+    position: absolute;
+    top: -3px;
+    touch-action: none;
+    transform: translateX(-50%);
+    width: 10px;
+    z-index: 3;
+}
+
+.secourses-refgal-trim-handle:hover {
+    background: #74c0fc;
+    box-shadow: 0 0 0 2px rgba(77, 171, 247, 0.35);
+}
+
+.secourses-refgal-trim-fields {
+    align-items: center;
+    display: flex;
+    flex-wrap: wrap;
+    gap: 6px;
+}
+
+.secourses-refgal-trim-label {
+    align-items: center;
+    color: color-mix(in srgb, var(--refgal-fg) 70%, transparent);
+    display: inline-flex;
+    font-size: 10px;
+    gap: 4px;
+}
+
+.secourses-refgal-trim-input {
+    background: var(--refgal-bg);
+    border: 1px solid var(--refgal-border);
+    border-radius: 4px;
+    color: var(--refgal-fg);
+    font-size: 11px;
+    padding: 2px 4px;
+    width: 62px;
+}
+
+.secourses-refgal-trim-input:focus {
+    border-color: #7d5698;
+    outline: none;
+}
+
+.secourses-refgal-trim-tool {
+    background: var(--comfy-input-bg, #262626);
+    border: 1px solid var(--refgal-border);
+    border-radius: 5px;
+    color: var(--refgal-fg);
+    cursor: pointer;
+    font-size: 10px;
+    padding: 3px 7px;
+    white-space: nowrap;
+}
+
+.secourses-refgal-trim-tool:hover {
+    border-color: #7d5698;
+    color: #fff;
+}
+
+.secourses-refgal-trim-length {
+    color: color-mix(in srgb, var(--refgal-fg) 60%, transparent);
+    font-size: 10px;
+    margin-left: auto;
+    white-space: nowrap;
+}
+
+.secourses-refgal-trim-length-active {
+    color: #74c0fc;
+    font-weight: 700;
+}
+
+.secourses-refgal-loader-actions {
+    align-items: center;
+    display: flex;
+    gap: 8px;
+}
+
+.secourses-refgal-loader-add {
+    background: #7d5698;
+    border: 1px solid #7d5698;
+    border-radius: 6px;
+    color: #fff;
+    cursor: pointer;
+    font-size: 12px;
+    font-weight: 600;
+    padding: 4px 12px;
+    white-space: nowrap;
+}
+
+.secourses-refgal-loader-add:hover:not(:disabled) {
+    background: #9366b4;
+    border-color: #9366b4;
+}
+
+.secourses-refgal-loader-add:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
 /* ==================== Prompt box with colored token pills ==================== */
 
 .secourses-refgal-promptwrap {

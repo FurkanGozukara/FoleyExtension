@@ -32,6 +32,21 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     validation error instead of attempting an unsafe allocation.
   - Token aliases: `@img1`, `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`,
     and `@image#1` all work.
+  - Video soundtracks take the first native audio slots. With `@video1` and
+    standalone `@audio1` attached, use `<Audio 1>` for `@video1`'s soundtrack;
+    `@audio1` remains the standalone file and is translated to `<Audio 2>`.
+  - **Optional trim loader** — the *✂ Load + trim* toolbar button opens an
+    inline loader that previews one video or audio file, with draggable
+    start/end handles on a timeline (the preview seeks while dragging),
+    numeric start/end fields, playhead capture buttons, and a trim-window
+    preview. *Add to references* stores the file with `trim_start` /
+    `trim_end` seconds in its manifest entry; only that window is decoded at
+    generation time (video frames and soundtrack alike), with a keyframe seek
+    so trimming the tail of a long file stays fast. Nothing is re-encoded,
+    leaving the full range selected adds the file untrimmed, and trimmed
+    cards show a `✂ 2–9.5s` badge. Entries without trim fields behave
+    exactly as before, so existing workflows, presets, and the SwarmUI
+    extension are unaffected.
 - **MiniMax H3 References (Gallery)** — adapts the gallery pack to MiniMax H3.
   It translates `@` tokens into the `<Picture i>` / `<Video k>` / `<Audio j>`
   labels the model expects (audio labels are offset past video soundtracks

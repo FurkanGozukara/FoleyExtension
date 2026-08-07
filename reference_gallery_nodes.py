@@ -174,9 +174,38 @@ def _parse_manifest(references):
             if not name:
                 name = re.sub(r" \[(input|output|temp)\]$", "", str(entry["file"]))
                 name = name.replace("\\", "/").rsplit("/", 1)[-1]
-            cleaned.append({"file": str(entry["file"]), "name": name})
+            cleaned_entry = {"file": str(entry["file"]), "name": name}
+            trim = _entry_trim(entry)
+            if trim is not None:
+                cleaned_entry["trim_start"] = trim[0]
+                if trim[1] is not None:
+                    cleaned_entry["trim_end"] = trim[1]
+            cleaned.append(cleaned_entry)
         manifest[key] = cleaned
     return manifest
+
+
+def _entry_trim(entry):
+    """Validated (start_seconds, end_seconds|None) for a manifest entry, or None when untrimmed.
+
+    Trims come from the gallery's optional 'Load + trim' loader. Degenerate or
+    malformed ranges fall back to the untrimmed behavior instead of erroring so
+    a hand-edited manifest never blocks execution.
+    """
+    try:
+        start = float(entry.get("trim_start") or 0.0)
+        end = entry.get("trim_end")
+        end = None if end is None else float(end)
+    except (TypeError, ValueError):
+        return None
+    if not math.isfinite(start) or (end is not None and not math.isfinite(end)):
+        return None
+    start = max(0.0, start)
+    if end is not None and end - start < 0.05:
+        return None
+    if start <= 0.0 and end is None:
+        return None
+    return start, end
 
 
 def _resolve_reference_path(file):
@@ -518,11 +547,38 @@ def _load_reference_image(path, target_width=None, target_height=None):
     return torch.from_numpy(array)[None,]
 
 
-def _decode_video_frames(path, fps_out, max_seconds=None, *, max_frames=None, area_cap=VIDEO_DECODE_AREA_CAP):
+def _stream_start_seconds(container, stream):
+    """The stream's own start time in seconds; HTML players show this as 0:00."""
+    import av
+
+    if stream.start_time is not None and stream.time_base:
+        return float(stream.start_time * stream.time_base)
+    if container.start_time is not None:
+        return max(0.0, container.start_time / av.time_base)
+    return 0.0
+
+
+def _seek_to_trim_start(container, stream, seconds):
+    """Best-effort keyframe seek to at/before ``seconds``; callers still drop up to the exact target."""
+    import av
+
+    try:
+        if stream.time_base:
+            container.seek(max(0, int(seconds / stream.time_base)), stream=stream)
+        else:
+            container.seek(max(0, int(seconds * av.time_base)))
+    except (av.error.FFmpegError, OSError, OverflowError, ValueError):
+        pass  # decoding from the file start reaches the target too, just slower
+
+
+def _decode_video_frames(path, fps_out, max_seconds=None, *, max_frames=None, area_cap=VIDEO_DECODE_AREA_CAP,
+                         trim_start=0.0):
     """Streams a video into a uint8 [T, H, W, 3] tensor resampled to ``fps_out``.
 
     Frames are downscaled by FFmpeg before conversion to a NumPy/Torch RGB
     buffer, avoiding a full-resolution RGB float interpolation allocation.
+    ``trim_start`` skips the first seconds of the source; the duration cap
+    (``max_frames`` / ``max_seconds``) then applies from that point.
     """
     import av
     import torch
@@ -532,6 +588,7 @@ def _decode_video_frames(path, fps_out, max_seconds=None, *, max_frames=None, ar
         max_frames = max(1, round(float(max_seconds) * fps_out))
     else:
         max_frames = max(1, int(max_frames))
+    trim_start = max(0.0, float(trim_start or 0.0))
     frames = []
     target_size = None
 
@@ -544,13 +601,17 @@ def _decode_video_frames(path, fps_out, max_seconds=None, *, max_frames=None, ar
         first_time = None
         next_output_time = 0.0
         output_interval = 1.0 / fps_out
+        start_target = None
+        if trim_start > 0.0:
+            start_target = _stream_start_seconds(container, stream) + trim_start
+            _seek_to_trim_start(container, stream, start_target)
 
         for frame in container.decode(stream):
-            if frame.pts is not None:
-                frame_time = float(frame.pts * frame.time_base)
-            else:
-                frame_time = decoded_count / source_fps
+            has_pts = frame.pts is not None
+            frame_time = float(frame.pts * frame.time_base) if has_pts else decoded_count / source_fps
             decoded_count += 1
+            if start_target is not None and has_pts and first_time is None and frame_time + 1e-4 < start_target:
+                continue  # decoded only to reach the trim start
             if first_time is None:
                 first_time = frame_time
             relative_time = max(0.0, frame_time - first_time)
@@ -583,15 +644,25 @@ def _decode_video_frames(path, fps_out, max_seconds=None, *, max_frames=None, ar
                 break
 
     if not frames:
+        if trim_start > 0.0:
+            raise ValueError(
+                f"No decodable frames were found in reference video '{path}' "
+                f"after its {trim_start:.2f}s trim start. Re-trim it in the gallery."
+            )
         raise ValueError(f"No decodable frames were found in reference video '{path}'.")
     return torch.stack(frames, dim=0)
 
 
-def _decode_video_audio(path, max_seconds):
-    """Returns the video's soundtrack as a ComfyUI AUDIO dict, or None when it has no usable audio."""
+def _decode_video_audio(path, max_seconds, trim_start=0.0):
+    """Returns the video's soundtrack as a ComfyUI AUDIO dict, or None when it has no usable audio.
+
+    ``trim_start`` skips the first seconds of the soundtrack; ``max_seconds``
+    then caps the duration kept from that point.
+    """
     import av
     import torch
 
+    trim_start = max(0.0, float(trim_start or 0.0))
     try:
         with av.open(path, mode="r") as container:
             if not container.streams.audio:
@@ -602,12 +673,25 @@ def _decode_video_audio(path, max_seconds):
                 return None
             n_channels = stream.channels or 1
             max_samples = int(max_seconds * sample_rate)
+            start_target = None
+            if trim_start > 0.0:
+                start_target = _stream_start_seconds(container, stream) + trim_start
+                _seek_to_trim_start(container, stream, start_target)
             chunks = []
             collected = 0
             for frame in container.decode(streams=stream.index):
                 buffer = torch.from_numpy(frame.to_ndarray())
                 if buffer.shape[0] != n_channels:
                     buffer = buffer.view(-1, n_channels).t()
+                if start_target is not None and frame.pts is not None:
+                    frame_time = float(frame.pts * frame.time_base)
+                    if frame_time + buffer.shape[1] / sample_rate <= start_target:
+                        continue  # decoded only to reach the trim start
+                    if frame_time < start_target:
+                        buffer = buffer[:, round((start_target - frame_time) * sample_rate):]
+                        if not buffer.shape[1]:
+                            continue
+                    start_target = None  # aligned with the trim start; keep every later frame
                 chunks.append(buffer)
                 collected += buffer.shape[1]
                 if collected >= max_samples:
@@ -633,11 +717,27 @@ def _f32_pcm(waveform):
     raise ValueError(f"Unsupported reference audio dtype: {waveform.dtype}")
 
 
-def _load_reference_audio(path, max_seconds):
-    audio = _decode_video_audio(path, max_seconds)
+def _load_reference_audio(path, max_seconds, trim_start=0.0):
+    audio = _decode_video_audio(path, max_seconds, trim_start=trim_start)
     if audio is None:
+        if trim_start > 0.0:
+            raise ValueError(
+                f"No usable audio was found in reference audio '{path}' "
+                f"after its {trim_start:.2f}s trim start. Re-trim it in the gallery."
+            )
         raise ValueError(f"No usable audio stream found in reference audio '{path}'.")
     return audio
+
+
+def _entry_trim_window(entry, max_seconds):
+    """Per-entry (trim_start, effective_seconds) honoring an optional trim window."""
+    trim = _entry_trim(entry)
+    if trim is None:
+        return 0.0, float(max_seconds)
+    start, end = trim
+    if end is None:
+        return start, float(max_seconds)
+    return start, min(float(max_seconds), end - start)
 
 
 def _prepare_image_references(entries, width, height, ref_image_size, byte_budget=None):
@@ -686,14 +786,20 @@ def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=Non
         target_size = None
         if source_width and source_height:
             target_size = _fit_dimensions(source_width, source_height, area_cap)
+        trim_start, trim_seconds = _entry_trim_window(entry, max_seconds)
+        entry_frames = min(max_frames, max(1, round(trim_seconds * max(1.0, float(fps)))))
+        if entry_frames >= 5:
+            while entry_frames % 17 != 5:
+                entry_frames -= 1
         specs.append({
             "path": path,
             "name": entry.get("name") or "?",
             "source_size": (source_width, source_height),
             "target_size": target_size,
             "area_cap": area_cap,
-            "max_frames": max_frames,
-            "audio_seconds": audio_seconds,
+            "max_frames": entry_frames,
+            "audio_seconds": min(audio_seconds, trim_seconds),
+            "trim_start": trim_start,
             "has_audio": has_audio,
         })
     return specs
@@ -740,6 +846,7 @@ class _LazyVideoReferences:
                 self.fps,
                 max_frames=spec["max_frames"],
                 area_cap=spec["area_cap"],
+                trim_start=spec.get("trim_start", 0.0),
             )
             if uint8_frames.shape[0] < 5:
                 raise ValueError(
@@ -772,7 +879,9 @@ class _LazyVideoAudioReferences:
         if not spec["has_audio"]:
             return default
         if index not in self._cache:
-            self._cache[index] = _decode_video_audio(spec["path"], spec["audio_seconds"])
+            self._cache[index] = _decode_video_audio(
+                spec["path"], spec["audio_seconds"], trim_start=spec.get("trim_start", 0.0)
+            )
         return self._cache[index] or default
 
 
@@ -787,7 +896,8 @@ class _LazyAudioReferences:
     def values(self):
         for entry in self.entries:
             path = _resolve_reference_entry(entry)
-            yield _load_reference_audio(path, self.max_seconds)
+            trim_start, seconds = _entry_trim_window(entry, self.max_seconds)
+            yield _load_reference_audio(path, seconds, trim_start=trim_start)
 
 
 class _LazyAudioOnlyReferences:
@@ -806,6 +916,7 @@ class _LazyAudioOnlyReferences:
             audio = _decode_video_audio(
                 spec["path"],
                 min(float(spec["audio_seconds"]), self.per_item_seconds),
+                trim_start=spec.get("trim_start", 0.0),
             )
             if audio is None:
                 raise ValueError(
@@ -815,7 +926,8 @@ class _LazyAudioOnlyReferences:
             yield audio
         for entry in self.audio_entries:
             path = _resolve_reference_entry(entry)
-            yield _load_reference_audio(path, self.per_item_seconds)
+            trim_start, seconds = _entry_trim_window(entry, self.per_item_seconds)
+            yield _load_reference_audio(path, seconds, trim_start=trim_start)
 
 
 class SECoursesReferenceGallery:
@@ -861,11 +973,13 @@ class SECoursesReferenceGallery:
     FUNCTION = "collect"
     DESCRIPTION = (
         "SwarmUI-style unified reference uploader: add images, videos, and audio next to the prompt and mention "
-        "them as '@image1', '@video1', or '@audio1'. Video soundtracks are paired automatically. Feed the "
-        "references output into a model adapter node (eg 'MiniMax H3 References (Gallery)'). Media stays lazy "
-        "until the adapter can apply its canvas, duration, and memory limits. An optional folder path emits one "
-        "item per recursively discovered .txt prompt, using only media in that prompt's own directory and falling "
-        "back to the gallery attachments when the directory has no media."
+        "them as '@image1', '@video1', or '@audio1'. Video soundtracks are paired automatically. The optional "
+        "'Load + trim' loader previews a video or audio file and selects a start/end window before adding it; "
+        "only that window is decoded at generation time. Feed the references output into a model adapter node "
+        "(eg 'MiniMax H3 References (Gallery)'). Media stays lazy until the adapter can apply its canvas, "
+        "duration, and memory limits. An optional folder path emits one item per recursively discovered .txt "
+        "prompt, using only media in that prompt's own directory and falling back to the gallery attachments "
+        "when the directory has no media."
     )
 
     def collect(self, prompt, references, video_fps, max_seconds, batch_folder=""):

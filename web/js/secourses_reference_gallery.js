@@ -7,6 +7,13 @@
  * upload through ComfyUI's native /upload/image endpoint into the input
  * directory; the ordered manifest is stored in the node's hidden "references"
  * widget so the Python side can load every file.
+ *
+ * The optional "Load + trim" loader previews one video or audio file, lets the
+ * user drag a start/end window on a timeline, and then adds the file to the
+ * references with `trim_start` / `trim_end` seconds in its manifest entry. The
+ * file itself is never re-encoded; the Python side decodes only the selected
+ * window at generation time. Entries without trim fields behave exactly as
+ * before, so existing workflows and presets are unaffected.
  */
 
 import { app } from "../../../scripts/app.js";
@@ -176,13 +183,22 @@ class ReferenceGalleryUI {
         this.addButton.className = "secourses-refgal-add";
         this.addButton.textContent = "➕ Add references";
         this.addButton.title = "Add reference images, videos, or audio (or drag & drop / paste them)";
+        this.trimToggle = document.createElement("button");
+        this.trimToggle.type = "button";
+        this.trimToggle.className = "secourses-refgal-add secourses-refgal-trimtoggle";
+        this.trimToggle.textContent = "✂ Load + trim";
+        this.trimToggle.title = "Optional loader: preview a video or audio file, pick a start/end window, then add it to the references. Leave the full range selected to add it untrimmed.";
         this.counter = document.createElement("span");
         this.counter.className = "secourses-refgal-counter";
+        this.soundtrackHint = document.createElement("span");
+        this.soundtrackHint.className = "secourses-refgal-hint";
+        this.soundtrackHint.textContent = "For @video1's soundtrack, type <Audio 1>; @audio1 is the first standalone audio file";
+        this.soundtrackHint.title = "A reference video's soundtrack uses the native <Audio N> label. Standalone @audioN tokens always refer to standalone audio attachments and are offset after video soundtracks automatically.";
         this.hint = document.createElement("span");
         this.hint.className = "secourses-refgal-hint";
         this.hint.textContent = "Type @ in the prompt to reference";
         this.hint.title = "Type '@' in the prompt for reference autocomplete, eg '@image1'. Click any card to insert its token.";
-        this.toolbar.append(this.addButton, this.counter, this.hint);
+        this.toolbar.append(this.addButton, this.trimToggle, this.counter, this.soundtrackHint, this.hint);
 
         this.cards = document.createElement("div");
         this.cards.className = "secourses-refgal-cards";
@@ -213,12 +229,181 @@ class ReferenceGalleryUI {
         this.fileInput.accept = "image/*,video/*,audio/*";
         this.fileInput.hidden = true;
 
-        this.root.append(this.toolbar, this.cardsWrap, this.promptWrap, this.fileInput);
+        this.buildTrimLoader();
+        this.root.append(this.toolbar, this.cardsWrap, this.loader, this.promptWrap, this.fileInput, this.loaderFileInput);
         this.bindEvents();
+    }
+
+    /** The optional "Load + trim" panel: preview one video/audio file and pick a start/end window. */
+    buildTrimLoader() {
+        this.loader = document.createElement("div");
+        this.loader.className = "secourses-refgal-loader";
+        this.loader.hidden = true;
+        this.loaderMedia = null;
+        this.trimPreviewActive = false;
+
+        const head = document.createElement("div");
+        head.className = "secourses-refgal-loader-head";
+        const title = document.createElement("span");
+        title.className = "secourses-refgal-loader-title";
+        title.textContent = "✂ Trim loader";
+        const headHint = document.createElement("span");
+        headHint.className = "secourses-refgal-loader-hint";
+        headHint.textContent = "optional — trim, then add; full range adds untrimmed";
+        const close = document.createElement("button");
+        close.type = "button";
+        close.className = "secourses-refgal-loader-close";
+        close.innerHTML = "&times;";
+        close.title = "Close the trim loader";
+        head.append(title, headHint, close);
+
+        const pickRow = document.createElement("div");
+        pickRow.className = "secourses-refgal-loader-pickrow";
+        this.loaderPick = document.createElement("button");
+        this.loaderPick.type = "button";
+        this.loaderPick.className = "secourses-refgal-add";
+        this.loaderPick.textContent = "🎬 Choose video / audio…";
+        this.loaderPick.title = "Pick a video or audio file to preview and trim. Images never need trimming — add them with “Add references”.";
+        this.loaderName = document.createElement("span");
+        this.loaderName.className = "secourses-refgal-loader-file";
+        this.loaderName.textContent = "No file loaded yet";
+        pickRow.append(this.loaderPick, this.loaderName);
+
+        this.loaderPreview = document.createElement("div");
+        this.loaderPreview.className = "secourses-refgal-loader-preview";
+        this.loaderPreview.hidden = true;
+
+        this.trimBody = document.createElement("div");
+        this.trimBody.className = "secourses-refgal-trimbody";
+        this.trimBody.hidden = true;
+        this.trimTrack = document.createElement("div");
+        this.trimTrack.className = "secourses-refgal-trim-track";
+        this.trimTrack.title = "Click to seek the preview. Drag the handles to set the trim window.";
+        this.trimFill = document.createElement("div");
+        this.trimFill.className = "secourses-refgal-trim-fill";
+        this.trimPlayhead = document.createElement("div");
+        this.trimPlayhead.className = "secourses-refgal-trim-playhead";
+        this.trimStartHandle = document.createElement("div");
+        this.trimStartHandle.className = "secourses-refgal-trim-handle secourses-refgal-trim-handle-start";
+        this.trimStartHandle.title = "Drag to set the trim start (the preview follows)";
+        this.trimEndHandle = document.createElement("div");
+        this.trimEndHandle.className = "secourses-refgal-trim-handle secourses-refgal-trim-handle-end";
+        this.trimEndHandle.title = "Drag to set the trim end (the preview follows)";
+        this.trimTrack.append(this.trimFill, this.trimPlayhead, this.trimStartHandle, this.trimEndHandle);
+
+        const fields = document.createElement("div");
+        fields.className = "secourses-refgal-trim-fields";
+        const makeTimeField = (labelText, titleText) => {
+            const label = document.createElement("label");
+            label.className = "secourses-refgal-trim-label";
+            label.append(labelText);
+            const input = document.createElement("input");
+            input.type = "number";
+            input.className = "secourses-refgal-trim-input";
+            input.min = "0";
+            input.step = "0.05";
+            input.title = titleText;
+            label.appendChild(input);
+            fields.appendChild(label);
+            return input;
+        };
+        this.trimStartInput = makeTimeField("Start", "Trim start in seconds");
+        this.trimEndInput = makeTimeField("End", "Trim end in seconds");
+        const makeToolButton = (text, titleText) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "secourses-refgal-trim-tool";
+            button.textContent = text;
+            button.title = titleText;
+            fields.appendChild(button);
+            return button;
+        };
+        this.trimSetStart = makeToolButton("⇤ Start", "Set the trim start to the current playback position");
+        this.trimSetEnd = makeToolButton("End ⇥", "Set the trim end to the current playback position");
+        this.trimPreviewBtn = makeToolButton("▶ Preview", "Play only the selected trim window");
+        this.trimBadge = document.createElement("span");
+        this.trimBadge.className = "secourses-refgal-trim-length";
+        fields.appendChild(this.trimBadge);
+        this.trimBody.append(this.trimTrack, fields);
+
+        const actions = document.createElement("div");
+        actions.className = "secourses-refgal-loader-actions";
+        this.loaderAdd = document.createElement("button");
+        this.loaderAdd.type = "button";
+        this.loaderAdd.className = "secourses-refgal-loader-add";
+        this.loaderAdd.textContent = "➕ Add to references";
+        this.loaderAdd.title = "Add this file to the references. Only the selected window is used at generation time.";
+        this.loaderAdd.disabled = true;
+        this.loaderNote = document.createElement("span");
+        this.loaderNote.className = "secourses-refgal-loader-hint";
+        actions.append(this.loaderAdd, this.loaderNote);
+
+        this.loader.append(head, pickRow, this.loaderPreview, this.trimBody, actions);
+
+        this.loaderFileInput = document.createElement("input");
+        this.loaderFileInput.type = "file";
+        this.loaderFileInput.accept = "video/*,audio/*";
+        this.loaderFileInput.hidden = true;
+
+        close.addEventListener("click", () => this.toggleTrimLoader(false));
+        this.loaderPick.addEventListener("click", () => this.loaderFileInput.click());
+        this.loaderFileInput.addEventListener("change", async () => {
+            const file = this.loaderFileInput.files?.[0];
+            this.loaderFileInput.value = "";
+            if (file) await this.loaderPickFile(file);
+        });
+        this.loaderAdd.addEventListener("click", () => this.addTrimmedReference());
+        this.bindTrimHandle(this.trimStartHandle, true);
+        this.bindTrimHandle(this.trimEndHandle, false);
+        this.trimTrack.addEventListener("pointerdown", (event) => {
+            if (event.target === this.trimStartHandle || event.target === this.trimEndHandle) return;
+            const media = this.loaderMedia;
+            if (!media?.duration || !media.element) return;
+            event.preventDefault();
+            media.element.currentTime = this.timelineTime(event);
+        });
+        this.trimStartInput.addEventListener("change", () => {
+            const media = this.loaderMedia;
+            if (!media?.duration) return;
+            const value = parseFloat(this.trimStartInput.value);
+            this.setTrimRange(value, media.end, { seek: value });
+        });
+        this.trimEndInput.addEventListener("change", () => {
+            const media = this.loaderMedia;
+            if (!media?.duration) return;
+            const value = parseFloat(this.trimEndInput.value);
+            this.setTrimRange(media.start, value, { seek: value });
+        });
+        for (const input of [this.trimStartInput, this.trimEndInput]) {
+            input.addEventListener("keydown", (event) => {
+                if (event.key === "Enter") input.blur();
+                if (!(event.ctrlKey || event.metaKey)) event.stopPropagation();
+            });
+        }
+        this.trimSetStart.addEventListener("click", () => {
+            const media = this.loaderMedia;
+            if (!media?.duration || !media.element) return;
+            this.setTrimRange(media.element.currentTime, media.end);
+        });
+        this.trimSetEnd.addEventListener("click", () => {
+            const media = this.loaderMedia;
+            if (!media?.duration || !media.element) return;
+            this.setTrimRange(media.start, media.element.currentTime);
+        });
+        this.trimPreviewBtn.addEventListener("click", () => {
+            const media = this.loaderMedia;
+            if (!media?.duration || !media.element) return;
+            media.element.currentTime = media.start;
+            this.trimPreviewActive = true;
+            media.element.play().catch(() => {
+                this.trimPreviewActive = false;
+            });
+        });
     }
 
     bindEvents() {
         this.addButton.addEventListener("click", () => this.fileInput.click());
+        this.trimToggle.addEventListener("click", () => this.toggleTrimLoader());
         this.fileInput.addEventListener("change", async () => {
             await this.addFiles([...this.fileInput.files]);
             this.fileInput.value = "";
@@ -463,6 +648,219 @@ class ReferenceGalleryUI {
         }
     }
 
+    // ==================== Optional trim loader ====================
+
+    toggleTrimLoader(open = this.loader.hidden) {
+        this.loader.hidden = !open;
+        this.trimToggle.classList.toggle("secourses-refgal-trimtoggle-active", open);
+        if (!open) {
+            this.resetTrimLoader();
+        } else {
+            this.refreshLayout();
+        }
+    }
+
+    resetTrimLoader() {
+        const element = this.loaderMedia?.element;
+        if (element) {
+            element.pause?.();
+            element.removeAttribute("src");
+            element.load?.();
+        }
+        this.loaderMedia = null;
+        this.trimPreviewActive = false;
+        this.loaderPreview.textContent = "";
+        this.loaderPreview.hidden = true;
+        this.trimBody.hidden = true;
+        this.loaderName.textContent = "No file loaded yet";
+        this.loaderName.title = "";
+        this.loaderNote.textContent = "";
+        this.loaderAdd.disabled = true;
+        this.trimPlayhead.style.left = "0%";
+        this.refreshLayout();
+    }
+
+    async loaderPickFile(file) {
+        const kind = mediaKind(file);
+        if (kind !== "video" && kind !== "audio") {
+            notify("warn", "Trim loader", "Pick a video or audio file. Images never need trimming — add them with “Add references”.");
+            return;
+        }
+        this.resetTrimLoader();
+        this.loaderName.textContent = `Uploading ${file.name}…`;
+        let uploaded;
+        try {
+            uploaded = await uploadReferenceFile(file);
+        } catch (error) {
+            this.loaderName.textContent = "No file loaded yet";
+            notify("error", "Reference upload failed", `${file.name}: ${error}`);
+            return;
+        }
+        const element = document.createElement(kind === "video" ? "video" : "audio");
+        element.className = `secourses-refgal-loader-media secourses-refgal-loader-media-${kind}`;
+        element.controls = true;
+        element.preload = "metadata";
+        if (kind === "video") element.playsInline = true;
+        element.src = viewURL(uploaded.file);
+        this.loaderMedia = { uploaded, kind, element, duration: null, start: 0, end: null };
+        this.loaderName.textContent = file.name;
+        this.loaderName.title = file.name;
+        this.loaderPreview.appendChild(element);
+        this.loaderPreview.hidden = false;
+        this.loaderAdd.disabled = false;
+        this.loaderNote.textContent = "Loading duration…";
+        element.addEventListener("loadedmetadata", () => {
+            if (this.loaderMedia?.element !== element) return;
+            const duration = Number(element.duration);
+            if (Number.isFinite(duration) && duration > 0) {
+                this.loaderMedia.duration = duration;
+                this.loaderMedia.start = 0;
+                this.loaderMedia.end = duration;
+                this.loaderNote.textContent = "";
+                this.updateTrimUI();
+            } else {
+                this.loaderNote.textContent = "Duration unavailable — this file can only be added untrimmed.";
+            }
+            this.refreshLayout();
+        });
+        element.addEventListener("timeupdate", () => {
+            const media = this.loaderMedia;
+            if (media?.element !== element || !media.duration) return;
+            const position = Math.min(element.currentTime, media.duration);
+            this.trimPlayhead.style.left = `${(position / media.duration) * 100}%`;
+            if (this.trimPreviewActive && element.currentTime >= media.end - 0.02) {
+                element.pause();
+                this.trimPreviewActive = false;
+            }
+        });
+        element.addEventListener("pause", () => {
+            this.trimPreviewActive = false;
+        });
+        element.addEventListener("error", () => {
+            if (this.loaderMedia?.element !== element) return;
+            this.loaderNote.textContent = "Preview failed — the file can still be added untrimmed.";
+        });
+        this.refreshLayout();
+    }
+
+    /** Minimum trim window; reference videos need ≥5 frames (~0.2s at 24 fps). */
+    trimMinRange() {
+        return this.loaderMedia?.kind === "video" ? 0.25 : 0.05;
+    }
+
+    timelineTime(event) {
+        const rect = this.trimTrack.getBoundingClientRect();
+        const ratio = rect.width ? (event.clientX - rect.left) / rect.width : 0;
+        return Math.max(0, Math.min(1, ratio)) * (this.loaderMedia?.duration ?? 0);
+    }
+
+    bindTrimHandle(handle, isStart) {
+        handle.addEventListener("pointerdown", (event) => {
+            const media = this.loaderMedia;
+            if (!media?.duration) return;
+            event.preventDefault();
+            event.stopPropagation();
+            handle.setPointerCapture(event.pointerId);
+            const move = (moveEvent) => {
+                const time = this.timelineTime(moveEvent);
+                if (isStart) {
+                    this.setTrimRange(Math.min(time, media.end - this.trimMinRange()), media.end, { seek: time });
+                } else {
+                    this.setTrimRange(media.start, Math.max(time, media.start + this.trimMinRange()), { seek: time });
+                }
+            };
+            const stop = () => {
+                handle.removeEventListener("pointermove", move);
+                handle.removeEventListener("pointerup", stop);
+                handle.removeEventListener("pointercancel", stop);
+            };
+            handle.addEventListener("pointermove", move);
+            handle.addEventListener("pointerup", stop);
+            handle.addEventListener("pointercancel", stop);
+            move(event);
+        });
+    }
+
+    setTrimRange(start, end, { seek } = {}) {
+        const media = this.loaderMedia;
+        if (!media?.duration) return;
+        const minRange = Math.min(this.trimMinRange(), media.duration);
+        start = Math.max(0, Math.min(Number.isFinite(start) ? start : 0, media.duration));
+        end = Math.max(0, Math.min(Number.isFinite(end) ? end : media.duration, media.duration));
+        if (end - start < minRange) {
+            end = Math.min(media.duration, start + minRange);
+            start = Math.max(0, Math.min(start, end - minRange));
+        }
+        media.start = start;
+        media.end = end;
+        if (seek != null && Number.isFinite(seek) && media.element) {
+            media.element.currentTime = Math.max(0, Math.min(seek, media.duration));
+        }
+        this.updateTrimUI();
+    }
+
+    isTrimmed() {
+        const media = this.loaderMedia;
+        if (!media?.duration) return false;
+        return media.start > 0.01 || media.end < media.duration - 0.01;
+    }
+
+    updateTrimUI() {
+        const media = this.loaderMedia;
+        if (!media?.duration) {
+            this.trimBody.hidden = true;
+            return;
+        }
+        const wasHidden = this.trimBody.hidden;
+        this.trimBody.hidden = false;
+        const startPct = (media.start / media.duration) * 100;
+        const endPct = (media.end / media.duration) * 100;
+        this.trimStartHandle.style.left = `${startPct}%`;
+        this.trimEndHandle.style.left = `${endPct}%`;
+        this.trimFill.style.left = `${startPct}%`;
+        this.trimFill.style.width = `${Math.max(0, endPct - startPct)}%`;
+        if (document.activeElement !== this.trimStartInput) this.trimStartInput.value = media.start.toFixed(2);
+        if (document.activeElement !== this.trimEndInput) this.trimEndInput.value = media.end.toFixed(2);
+        const trimmed = this.isTrimmed();
+        this.trimBadge.textContent = trimmed
+            ? `✂ ${(media.end - media.start).toFixed(2)}s of ${media.duration.toFixed(2)}s`
+            : `full ${media.duration.toFixed(2)}s (untrimmed)`;
+        this.trimBadge.classList.toggle("secourses-refgal-trim-length-active", trimmed);
+        if (wasHidden) this.refreshLayout();
+    }
+
+    addTrimmedReference() {
+        const media = this.loaderMedia;
+        if (!media) return;
+        const type = media.kind;
+        if (this.entriesOf(type).length >= REFERENCE_TYPES[type].max) {
+            notify("warn", "Reference limits reached",
+                `The gallery already has ${REFERENCE_TYPES[type].max} ${type} references. Remove one first.`);
+            return;
+        }
+        const entry = { ...media.uploaded };
+        if (this.isTrimmed()) {
+            entry.trim_start = Math.round(media.start * 1000) / 1000;
+            entry.trim_end = Math.round(media.end * 1000) / 1000;
+        }
+        this.entriesOf(type).push(entry);
+        this.saveManifest();
+        this.render();
+        notify("success", "Reference added", entry.trim_end != null
+            ? `${entry.name} (${entry.trim_start}s → ${entry.trim_end}s)`
+            : entry.name);
+        this.resetTrimLoader();
+    }
+
+    /** Gallery height consumed by the trim loader in its current state. */
+    trimLoaderHeight() {
+        if (this.loader.hidden) return 0;
+        if (!this.loaderMedia) return 104;
+        const preview = this.loaderMedia.kind === "video" ? 168 : 66;
+        const timeline = this.loaderMedia.duration ? 66 : 0;
+        return 104 + preview + timeline;
+    }
+
     // ==================== Rendering ====================
 
     render() {
@@ -544,6 +942,19 @@ class ReferenceGalleryUI {
         name.title = item.filename;
 
         card.append(remove, media, label, name);
+        if (item.entry.trim_start != null || item.entry.trim_end != null) {
+            const trim = document.createElement("span");
+            trim.className = "secourses-refgal-trimbadge";
+            const fmt = (value) => {
+                const rounded = Math.round(value * 10) / 10;
+                return Number.isInteger(rounded) ? String(rounded) : rounded.toFixed(1);
+            };
+            trim.textContent = item.entry.trim_end != null
+                ? `✂ ${fmt(item.entry.trim_start ?? 0)}–${fmt(item.entry.trim_end)}s`
+                : `✂ from ${fmt(item.entry.trim_start)}s`;
+            trim.title = "Trimmed reference — only this time window is used at generation time.";
+            card.appendChild(trim);
+        }
         card.addEventListener("click", (event) => {
             if (event.target.closest("button, audio")) return;
             this.insertToken(item.type, item.n);
@@ -562,13 +973,13 @@ class ReferenceGalleryUI {
         return fixed;
     }
 
-    /** Smallest gallery height that still shows the toolbar, one cards row, and the prompt. */
+    /** Smallest gallery height that still shows the toolbar, one cards row, the trim loader, and the prompt. */
     minContentHeight(width) {
         const total = this.state.images.length + this.state.videos.length + this.state.audios.length;
         const perRow = Math.max(1, Math.floor((width - 12) / 128));
         const rows = total ? Math.ceil(total / perRow) : 0;
         const cardsH = total ? Math.min(rows, 2) * 124 : 30;
-        return 34 + cardsH + 116 + 14;
+        return 34 + cardsH + this.trimLoaderHeight() + 116 + 14;
     }
 
     computeHeight(width) {
