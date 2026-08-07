@@ -195,6 +195,32 @@ class ReferenceGalleryTrimDecodeTests(unittest.TestCase):
         self.assertEqual(spec["max_frames"], 22)
         self.assertEqual(spec["audio_seconds"], 1.0)
 
+    def test_base64_soundtrack_loader_forwards_start_seconds(self):
+        import base64
+
+        expected = {"waveform": object(), "sample_rate": 32000}
+        with mock.patch.object(gallery, "_decode_video_audio", return_value=expected) as decode:
+            output, = gallery.SECoursesLoadVideoAudioB64().load(
+                base64.b64encode(b"fake-container").decode("ascii"),
+                max_seconds=15.0,
+                start_seconds=12.5,
+            )
+
+        self.assertIs(output, expected)
+        self.assertEqual(decode.call_args.kwargs["trim_start"], 12.5)
+
+    def test_base64_soundtrack_loader_defaults_to_no_trim(self):
+        import base64
+
+        expected = {"waveform": object(), "sample_rate": 32000}
+        with mock.patch.object(gallery, "_decode_video_audio", return_value=expected) as decode:
+            gallery.SECoursesLoadVideoAudioB64().load(
+                base64.b64encode(b"fake-container").decode("ascii"),
+                max_seconds=15.0,
+            )
+
+        self.assertEqual(decode.call_args.kwargs["trim_start"], 0.0)
+
     def test_untrimmed_video_spec_is_unchanged(self):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "plain.mp4"

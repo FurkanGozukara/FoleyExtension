@@ -1344,7 +1344,13 @@ class SECoursesLoadVideoAudioB64:
                     "default": 15.0, "min": 1.0, "max": 3600.0, "step": 0.5,
                     "tooltip": "Maximum soundtrack duration to decode. Clean 2-15 second references are recommended; longer references are allowed.",
                 }),
-            }
+            },
+            "optional": {
+                "start_seconds": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": 3600.0, "step": 0.05,
+                    "tooltip": "Skip this many seconds from the start of the soundtrack before max_seconds is applied (used by trimmed references).",
+                }),
+            },
         }
 
     CATEGORY = "SECourses/references"
@@ -1353,7 +1359,7 @@ class SECoursesLoadVideoAudioB64:
     FUNCTION = "load"
     DESCRIPTION = "Extracts a video's soundtrack directly from base64 data without decoding any video frames."
 
-    def load(self, video_base64, max_seconds):
+    def load(self, video_base64, max_seconds, start_seconds=0.0):
         payload = str(video_base64).strip()
         if payload.startswith("data:") and "," in payload:
             payload = payload.split(",", 1)[1]
@@ -1363,7 +1369,9 @@ class SECoursesLoadVideoAudioB64:
             raise ValueError("Reference video contains invalid base64 data.") from error
         if not video_bytes:
             raise ValueError("Reference video is empty.")
-        audio = _decode_video_audio(io.BytesIO(video_bytes), max(1.0, float(max_seconds)))
+        audio = _decode_video_audio(
+            io.BytesIO(video_bytes), max(1.0, float(max_seconds)),
+            trim_start=max(0.0, float(start_seconds)))
         if audio is None:
             raise ValueError(
                 "Reference video has no usable soundtrack. Audio-only MiniMax H3 mode does not use its frames."
