@@ -760,7 +760,11 @@ class ReferenceGalleryUI {
             if (!media?.duration) return;
             event.preventDefault();
             event.stopPropagation();
-            handle.setPointerCapture(event.pointerId);
+            try {
+                handle.setPointerCapture(event.pointerId);
+            } catch (error) {
+                // Dragging still works without capture; it just stops at the widget edge.
+            }
             const move = (moveEvent) => {
                 const time = this.timelineTime(moveEvent);
                 if (isStart) {

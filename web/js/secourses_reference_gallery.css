@@ -197,6 +197,13 @@ audio.secourses-refgal-media {
 
 /* ==================== Optional trim loader ==================== */
 
+/* These containers set display:flex, which would defeat the hidden attribute. */
+.secourses-refgal-loader[hidden],
+.secourses-refgal-trimbody[hidden],
+.secourses-refgal-loader-preview[hidden] {
+    display: none !important;
+}
+
 .secourses-refgal-trimtoggle-active {
     border-color: #7d5698;
     box-shadow: 0 0 0 1px rgba(125, 86, 152, 0.55);
