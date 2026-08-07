@@ -145,6 +145,8 @@ class ReferenceGalleryUI {
         this.node = node;
         this.promptWidget = node.widgets?.find((w) => w.name === "prompt");
         this.manifestWidget = node.widgets?.find((w) => w.name === "references");
+        this.batchFolderWidget = node.widgets?.find((w) => w.name === "batch_folder");
+        this.mergeBatchWidget = node.widgets?.find((w) => w.name === "merge_batch_videos");
         this.state = { images: [], videos: [], audios: [] };
         this.suggestIndex = 0;
         this.suggestMatches = null;
@@ -154,6 +156,8 @@ class ReferenceGalleryUI {
         this.buildDOM();
         hideWidget(this.promptWidget);
         hideWidget(this.manifestWidget);
+        hideWidget(this.batchFolderWidget);
+        hideWidget(this.mergeBatchWidget);
         const ui = this;
         this.widget = node.addDOMWidget("gallery_ui", "secourses_gallery", this.root, {
             hideOnZoom: false,
@@ -223,6 +227,37 @@ class ReferenceGalleryUI {
         this.suggest.hidden = true;
         this.promptWrap.append(this.overlay, this.textarea, this.suggest);
 
+        this.batchRow = document.createElement("div");
+        this.batchRow.className = "secourses-refgal-batchrow";
+        const batchField = document.createElement("label");
+        batchField.className = "secourses-refgal-batchfield";
+        const batchLabel = document.createElement("span");
+        batchLabel.className = "secourses-refgal-batchlabel";
+        batchLabel.textContent = "Folder batch (optional)";
+        this.batchFolderInput = document.createElement("textarea");
+        this.batchFolderInput.className = "secourses-refgal-batchpath";
+        this.batchFolderInput.rows = 2;
+        this.batchFolderInput.wrap = "soft";
+        this.batchFolderInput.spellcheck = false;
+        this.batchFolderInput.placeholder = "Paste a local folder path";
+        this.batchFolderInput.title = "Local folder containing UTF-8 .txt prompts. Subfolders are scanned recursively.";
+        batchField.append(batchLabel, this.batchFolderInput);
+
+        this.mergeToggle = document.createElement("label");
+        this.mergeToggle.className = "secourses-refgal-mergetoggle";
+        this.mergeToggle.title = "Also create one merged MP4 for each prompt directory. Existing per-prompt videos are unchanged; only the last merged MP4 is previewed.";
+        this.mergeCheckbox = document.createElement("input");
+        this.mergeCheckbox.type = "checkbox";
+        this.mergeCheckbox.setAttribute("role", "switch");
+        const mergeTrack = document.createElement("span");
+        mergeTrack.className = "secourses-refgal-mergetrack";
+        mergeTrack.setAttribute("aria-hidden", "true");
+        const mergeLabel = document.createElement("span");
+        mergeLabel.className = "secourses-refgal-mergelabel";
+        mergeLabel.textContent = "Merge videos";
+        this.mergeToggle.append(this.mergeCheckbox, mergeTrack, mergeLabel);
+        this.batchRow.append(batchField, this.mergeToggle);
+
         this.fileInput = document.createElement("input");
         this.fileInput.type = "file";
         this.fileInput.multiple = true;
@@ -230,7 +265,15 @@ class ReferenceGalleryUI {
         this.fileInput.hidden = true;
 
         this.buildTrimLoader();
-        this.root.append(this.toolbar, this.cardsWrap, this.loader, this.promptWrap, this.fileInput, this.loaderFileInput);
+        this.root.append(
+            this.toolbar,
+            this.cardsWrap,
+            this.loader,
+            this.promptWrap,
+            this.batchRow,
+            this.fileInput,
+            this.loaderFileInput,
+        );
         this.bindEvents();
     }
 
@@ -404,6 +447,23 @@ class ReferenceGalleryUI {
     bindEvents() {
         this.addButton.addEventListener("click", () => this.fileInput.click());
         this.trimToggle.addEventListener("click", () => this.toggleTrimLoader());
+        this.batchFolderInput.addEventListener("input", () => {
+            if (this.batchFolderWidget) {
+                this.batchFolderWidget.value = this.batchFolderInput.value;
+                this.batchFolderWidget.callback?.(this.batchFolderWidget.value);
+            }
+            this.node.setDirtyCanvas(true, true);
+        });
+        this.batchFolderInput.addEventListener("keydown", (event) => {
+            if (!(event.ctrlKey || event.metaKey)) event.stopPropagation();
+        });
+        this.mergeCheckbox.addEventListener("change", () => {
+            if (this.mergeBatchWidget) {
+                this.mergeBatchWidget.value = this.mergeCheckbox.checked;
+                this.mergeBatchWidget.callback?.(this.mergeBatchWidget.value);
+            }
+            this.node.setDirtyCanvas(true, true);
+        });
         this.fileInput.addEventListener("change", async () => {
             await this.addFiles([...this.fileInput.files]);
             this.fileInput.value = "";
@@ -491,10 +551,21 @@ class ReferenceGalleryUI {
             videos: Array.isArray(parsed.videos) ? parsed.videos.filter((e) => e && e.file) : [],
             audios: Array.isArray(parsed.audios) ? parsed.audios.filter((e) => e && e.file) : [],
         };
+        this.batchFolderInput.value = String(this.batchFolderWidget?.value ?? "");
+        const mergeValue = this.mergeBatchWidget?.value;
+        this.mergeCheckbox.checked = mergeValue === true || mergeValue === "true" || mergeValue === 1;
+        this.updateMergeAvailability();
         if (hydratePrompt) {
             this.textarea.value = this.promptWidget?.value ?? "";
         }
         this.render();
+    }
+
+    updateMergeAvailability() {
+        const output = this.node.outputs?.find((item) => item.name === "merge_batch_videos");
+        const available = Boolean(output?.links?.length);
+        this.mergeToggle.hidden = !available;
+        this.mergeCheckbox.disabled = !available;
     }
 
     configureFromWidgets() {
@@ -977,13 +1048,13 @@ class ReferenceGalleryUI {
         return fixed;
     }
 
-    /** Smallest gallery height that still shows the toolbar, one cards row, the trim loader, and the prompt. */
+    /** Smallest gallery height that still shows the toolbar, cards, prompt, and two-line batch path. */
     minContentHeight(width) {
         const total = this.state.images.length + this.state.videos.length + this.state.audios.length;
         const perRow = Math.max(1, Math.floor((width - 12) / 128));
         const rows = total ? Math.ceil(total / perRow) : 0;
         const cardsH = total ? Math.min(rows, 2) * 124 : 30;
-        return 34 + cardsH + this.trimLoaderHeight() + 116 + 14;
+        return 34 + cardsH + this.trimLoaderHeight() + 116 + 66 + 14;
     }
 
     computeHeight(width) {
@@ -1252,6 +1323,9 @@ app.registerExtension({
         });
         chainCallback(nodeType.prototype, "onConfigure", function () {
             this.__refGallery?.configureFromWidgets();
+        });
+        chainCallback(nodeType.prototype, "onConnectionsChange", function () {
+            this.__refGallery?.updateMergeAvailability();
         });
     },
 });

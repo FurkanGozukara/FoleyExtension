@@ -12,6 +12,9 @@ Two nodes cooperate to replace banks of LoadImage / LoadVideo / LoadAudio nodes:
   rewrites ``@image1`` / ``@video1`` / ``@audio1`` prompt tokens into the
   ``<Picture i>`` / ``<Video k>`` / ``<Audio j>`` labels the model expects and
   then defers to ComfyUI's own ``MiniMaxH3ReferenceToVideo`` implementation.
+- ``SECoursesBatchVideoMerge`` optionally gathers the mapped folder-batch
+  videos, concatenates one MP4 per prompt directory, and previews only the
+  final merged file while the normal Save Video node remains unchanged.
 
 Future reference-driven models only need another thin adapter node; the
 gallery, its UI, and the ``@`` token grammar stay identical.
@@ -346,6 +349,143 @@ def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_second
         })
         prompts.append(prompt)
     return packs, prompts
+
+
+def _batch_video_merge_groups(videos, reference_packs):
+    """Group generated videos by their folder-batch directory in prompt order."""
+    if len(videos) != len(reference_packs):
+        raise ValueError(
+            "Folder batch video merge received a different number of videos "
+            f"({len(videos)}) and reference packs ({len(reference_packs)})."
+        )
+
+    grouped = {}
+    for video, pack in zip(videos, reference_packs):
+        batch = pack.get("batch") if isinstance(pack, dict) else None
+        if not isinstance(batch, dict):
+            continue
+        root = str(batch.get("root") or "").strip()
+        folder = str(batch.get("folder") or "root").strip() or "root"
+        if not root:
+            raise ValueError("Folder batch video merge is missing the validated batch root.")
+        key = (root, folder)
+        group = grouped.setdefault(key, {"root": root, "folder": folder, "items": []})
+        try:
+            index = int(batch.get("index", len(group["items"]) + 1))
+        except (TypeError, ValueError):
+            index = len(group["items"]) + 1
+        group["items"].append((index, video))
+
+    groups = []
+    for group in grouped.values():
+        group["items"].sort(key=lambda item: item[0])
+        group["videos"] = [video for _, video in group.pop("items")]
+        groups.append(group)
+    return groups
+
+
+def _safe_merge_output_component(value, fallback):
+    cleaned = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', "_", str(value or "").strip())
+    cleaned = cleaned.strip(" .")
+    if cleaned in {"", ".", ".."}:
+        return fallback
+    return cleaned
+
+
+def _merge_output_prefix(root, folder):
+    root_name = _safe_merge_output_component(Path(root).name, "batch")
+    raw_parts = str(folder or "root").replace("\\", "/").split("/")
+    folder_parts = [
+        _safe_merge_output_component(part, "folder")
+        for part in raw_parts
+        if part not in {"", ".", ".."}
+    ]
+    if not folder_parts:
+        folder_parts = ["root"]
+    return "/".join(["video", "MiniMax_H3_Merged", root_name, *folder_parts, "merged"])
+
+
+def _write_concat_manifest(path, video_paths):
+    lines = []
+    for video_path in video_paths:
+        # FFmpeg's concat demuxer accepts POSIX separators on Windows. A single
+        # quote inside a path is escaped by ending and reopening the quoted run.
+        escaped = Path(video_path).resolve().as_posix().replace("'", "'\\''")
+        lines.append(f"file '{escaped}'")
+    Path(path).write_text("\n".join(lines) + "\n", encoding="utf-8", newline="\n")
+
+
+def _run_ffmpeg_concat(ffmpeg, manifest_path, output_path):
+    import subprocess
+
+    base = [
+        ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+        "-f", "concat", "-safe", "0", "-i", str(manifest_path),
+    ]
+    result = subprocess.run(
+        base + ["-c", "copy", "-movflags", "+faststart", str(output_path)],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.returncode == 0:
+        return
+
+    # All temporary segments use H.264/AAC, so stream copy is normally exact.
+    # Re-encoding is a compatibility fallback for unusual per-item stream data.
+    fallback = subprocess.run(
+        base + [
+            "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+            "-c:a", "aac", "-b:a", "192k", "-movflags", "+faststart",
+            str(output_path),
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if fallback.returncode != 0:
+        detail = fallback.stderr.strip() or result.stderr.strip() or "unknown FFmpeg error"
+        raise RuntimeError(f"Folder batch video merge failed: {detail}")
+
+
+def _merge_batch_video_group(group):
+    import tempfile
+
+    import folder_paths
+    from comfy_api.latest import Types
+    from imageio_ffmpeg import get_ffmpeg_exe
+
+    prefix = _merge_output_prefix(group["root"], group["folder"])
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        prefix, folder_paths.get_output_directory()
+    )
+    output_name = f"{filename}_{counter:05}_.mp4"
+    output_path = Path(full_output_folder) / output_name
+
+    temp_root = Path(folder_paths.get_temp_directory())
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="secourses_h3_merge_", dir=temp_root) as temp_dir:
+        temp_path = Path(temp_dir)
+        segment_paths = []
+        for index, video in enumerate(group["videos"], start=1):
+            segment_path = temp_path / f"segment_{index:05}.mp4"
+            video.save_to(
+                str(segment_path),
+                format=Types.VideoContainer.MP4,
+                codec=Types.VideoCodec.H264,
+            )
+            segment_paths.append(segment_path)
+        manifest_path = temp_path / "concat.txt"
+        _write_concat_manifest(manifest_path, segment_paths)
+        _run_ffmpeg_concat(get_ffmpeg_exe(), manifest_path, output_path)
+
+    return {
+        "filename": output_name,
+        "subfolder": subfolder,
+        "type": "output",
+        "format": "video/mp4",
+        "fullpath": str(output_path),
+    }
 
 
 def _resolve_reference_entry(entry):
@@ -958,17 +1098,22 @@ class SECoursesReferenceGallery:
                     "default": "",
                     "tooltip": "Optional local folder containing UTF-8 .txt prompts. Every prompt is processed in sorted order. Media beside each prompt is used as that prompt's references; when that folder has no media, the gallery attachments are used as fallback references. Subfolders are scanned recursively but never share media with each other.",
                 }),
+                "merge_batch_videos": ("BOOLEAN", {
+                    "default": False,
+                    "tooltip": "When Folder batch is active, also concatenate the generated videos in each prompt directory. Every directory gets its own merged MP4; only the last merged MP4 is previewed.",
+                }),
             }
         }
 
     CATEGORY = "SECourses/references"
-    RETURN_TYPES = (REF_PACK_TYPE, "STRING", "BOOLEAN")
-    RETURN_NAMES = ("references", "prompt", "folder_batch_active")
-    OUTPUT_IS_LIST = (True, True, True)
+    RETURN_TYPES = (REF_PACK_TYPE, "STRING", "BOOLEAN", "BOOLEAN")
+    RETURN_NAMES = ("references", "prompt", "folder_batch_active", "merge_batch_videos")
+    OUTPUT_IS_LIST = (True, True, True, True)
     OUTPUT_TOOLTIPS = (
         "Every gallery reference bundled in upload order, ready for a model adapter node such as 'MiniMax H3 References (Gallery)'.",
         "The prompt exactly as typed, or one output per sorted .txt file when Folder batch is active.",
         "True for folder-batch items and false for the normal single prompt.",
+        "True for every folder-batch item when the adjacent Merge videos toggle is enabled.",
     )
     FUNCTION = "collect"
     DESCRIPTION = (
@@ -979,10 +1124,11 @@ class SECoursesReferenceGallery:
         "(eg 'MiniMax H3 References (Gallery)'). Media stays lazy until the adapter can apply its canvas, "
         "duration, and memory limits. An optional folder path emits one item per recursively discovered .txt "
         "prompt, using only media in that prompt's own directory and falling back to the gallery attachments "
-        "when the directory has no media."
+        "when the directory has no media. The adjacent toggle can additionally merge every directory's "
+        "generated videos into one MP4."
     )
 
-    def collect(self, prompt, references, video_fps, max_seconds, batch_folder=""):
+    def collect(self, prompt, references, video_fps, max_seconds, batch_folder="", merge_batch_videos=False):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
         folder_batch = _collect_folder_batch(batch_folder, manifest, video_fps, max_seconds)
@@ -994,7 +1140,8 @@ class SECoursesReferenceGallery:
                 f"across {folders} unique folder(s)",
                 flush=True,
             )
-            return (packs, prompts, [True] * len(packs))
+            merge_flags = [bool(merge_batch_videos)] * len(packs)
+            return (packs, prompts, [True] * len(packs), merge_flags)
 
         pack = {
             "version": 2,
@@ -1010,13 +1157,24 @@ class SECoursesReferenceGallery:
             (("image(s)", pack["images"]), ("video(s)", pack["videos"]), ("audio", pack["audios"]))
         )
         print(f"[SECoursesReferenceGallery] prepared {summary} for target-aware decoding", flush=True)
-        return ([pack], [prompt], [False])
+        return ([pack], [prompt], [False], [False])
 
     @classmethod
-    def IS_CHANGED(cls, prompt, references, video_fps, max_seconds, batch_folder=""):
+    def IS_CHANGED(
+        cls, prompt, references, video_fps, max_seconds, batch_folder="", merge_batch_videos=False
+    ):
         digest = hashlib.sha256()
         digest.update(
-            repr((prompt, references, float(video_fps), float(max_seconds), str(batch_folder))).encode("utf-8")
+            repr(
+                (
+                    prompt,
+                    references,
+                    float(video_fps),
+                    float(max_seconds),
+                    str(batch_folder),
+                    bool(merge_batch_videos),
+                )
+            ).encode("utf-8")
         )
         try:
             root = _normalize_batch_folder(batch_folder)
@@ -1048,7 +1206,7 @@ class SECoursesReferenceGallery:
         return digest.hexdigest()
 
     @classmethod
-    def VALIDATE_INPUTS(cls, references, batch_folder=""):
+    def VALIDATE_INPUTS(cls, references, batch_folder="", merge_batch_videos=False):
         try:
             manifest = _parse_manifest(references)
         except ValueError as error:
@@ -1077,6 +1235,60 @@ class SECoursesReferenceGallery:
                 if not folder_paths.exists_annotated_filepath(entry["file"]):
                     return f"Reference file not found: {entry['file']}. Re-add it in the gallery."
         return True
+
+
+class SECoursesBatchVideoMerge:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO", {
+                    "tooltip": "The generated folder-batch videos. Connect the same VIDEO output used by Save Video.",
+                }),
+                "references": (REF_PACK_TYPE, {
+                    "tooltip": "Folder and prompt-order metadata from SECourses Reference Gallery.",
+                }),
+                "merge_batch_videos": ("BOOLEAN", {
+                    "tooltip": "Connect the gallery's Merge batch videos output. Disabled leaves every existing output unchanged and performs no additional save.",
+                }),
+            }
+        }
+
+    CATEGORY = "SECourses/video"
+    RETURN_TYPES = ()
+    INPUT_IS_LIST = True
+    OUTPUT_NODE = True
+    FUNCTION = "merge"
+    DESCRIPTION = (
+        "Optionally concatenates generated MiniMax H3 folder-batch videos without changing the normal per-prompt "
+        "Save Video output. Videos are grouped by the directory containing their .txt prompts and saved under "
+        "output/video/MiniMax_H3_Merged. Every directory receives one merged MP4, while the node previews only "
+        "the last merged MP4."
+    )
+
+    def merge(self, video, references, merge_batch_videos):
+        if not any(bool(value) for value in merge_batch_videos):
+            return {}
+
+        groups = _batch_video_merge_groups(video, references)
+        if not groups:
+            print(
+                "[SECoursesBatchVideoMerge] Merge videos is enabled, but Folder batch is not active; skipping.",
+                flush=True,
+            )
+            return {}
+
+        saved = []
+        for group in groups:
+            result = _merge_batch_video_group(group)
+            saved.append(result)
+            print(
+                f"[SECoursesBatchVideoMerge] merged {len(group['videos'])} video(s) for "
+                f"folder '{group['folder']}' -> {result['fullpath']}",
+                flush=True,
+            )
+
+        return {"ui": {"gifs": [saved[-1]]}}
 
 
 class SECoursesMiniMaxH3References:
@@ -1412,6 +1624,7 @@ class SECoursesTrimAudio:
 
 NODE_CLASS_MAPPINGS = {
     "SECoursesReferenceGallery": SECoursesReferenceGallery,
+    "SECoursesBatchVideoMerge": SECoursesBatchVideoMerge,
     "SECoursesMiniMaxH3References": SECoursesMiniMaxH3References,
     "SECoursesMiniMaxH3ReferenceMode": SECoursesMiniMaxH3ReferenceMode,
     "SECoursesMiniMaxH3TextOnly": SECoursesMiniMaxH3TextOnly,
@@ -1421,6 +1634,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesReferenceGallery": "SECourses Reference Gallery (Images / Videos / Audio)",
+    "SECoursesBatchVideoMerge": "Merge MiniMax H3 Folder Batch Videos",
     "SECoursesMiniMaxH3References": "MiniMax H3 References (Gallery)",
     "SECoursesMiniMaxH3ReferenceMode": "MiniMax H3 Reference Mode",
     "SECoursesMiniMaxH3TextOnly": "MiniMax H3 Text Only (Gallery Prompt)",

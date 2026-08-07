@@ -32,6 +32,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     validation error instead of attempting an unsafe allocation.
   - Token aliases: `@img1`, `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`,
     and `@image#1` all work.
+  - **Optional folder batch** uses a two-line, wrapping local-path field. The
+    adjacent *Merge videos* toggle leaves the normal per-prompt videos intact
+    and additionally concatenates videos from each prompt directory into one
+    MP4. A batch with no subfolders produces one root merge; batches with
+    multiple prompt directories produce one merge per directory. Only the
+    final merged MP4 is shown in the merge node preview.
   - Video soundtracks take the first native audio slots. With `@video1` and
     standalone `@audio1` attached, use `<Audio 1>` for `@video1`'s soundtrack;
     `@audio1` remains the standalone file and is translated to `<Audio 2>`.
@@ -63,6 +69,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   let one workflow choose the task-specific checkpoint lazily: FL2VA when the
   current prompt has no media and Ref2VA when it does. This also works per item
   in recursive folder batches.
+
+- **Merge MiniMax H3 Folder Batch Videos** is the optional output companion
+  used by the video presets. It groups generated videos using the gallery's
+  validated batch metadata and saves merged MP4s under
+  `output/video/MiniMax_H3_Merged/`, while the existing Save Video node keeps
+  saving every individual generation as before.
 
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.

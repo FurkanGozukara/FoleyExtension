@@ -76,7 +76,7 @@ class ReferenceGalleryTrimManifestTests(unittest.TestCase):
         with mock.patch.object(
             gallery, "_decode_video_frames", side_effect=AssertionError("eager video decode")
         ):
-            packs, _prompts, _active = node.collect("use @video1", manifest, 24, 15)
+            packs, _prompts, _active, _merge = node.collect("use @video1", manifest, 24, 15)
         self.assertEqual(packs[0]["videos"][0]["trim_start"], 1.0)
         self.assertEqual(packs[0]["videos"][0]["trim_end"], 3.5)
 
