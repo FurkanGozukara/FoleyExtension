@@ -41,12 +41,12 @@ class BatchVideoMergeTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "different number"):
             gallery._batch_video_merge_groups(["one"], [])
 
-    def test_output_prefix_mirrors_batch_folder_without_path_escape(self):
+    def test_output_prefix_is_flat_beside_individual_videos(self):
         prefix = gallery._merge_output_prefix("C:/source/My Batch", "chapter 1/take:two")
 
         self.assertEqual(
             prefix,
-            "video/MiniMax_H3_Merged/My Batch/chapter 1/take_two/merged",
+            "video/MiniMax_H3_Merged_My Batch_chapter 1_take_two",
         )
 
     def test_enabled_node_saves_every_group_and_previews_only_last(self):
@@ -70,13 +70,12 @@ class BatchVideoMergeTests(unittest.TestCase):
             )
 
         self.assertEqual(merge.call_count, 2)
-        self.assertEqual(result["ui"]["gifs"], [{
+        self.assertEqual(result["ui"]["images"], [{
             "filename": "b.mp4",
             "subfolder": "b",
             "type": "output",
-            "format": "video/mp4",
-            "fullpath": "C:/output/b.mp4",
         }])
+        self.assertEqual(result["ui"]["animated"], (True,))
 
     def test_disabled_node_leaves_outputs_untouched(self):
         with mock.patch.object(gallery, "_merge_batch_video_group") as merge:

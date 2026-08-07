@@ -238,6 +238,20 @@ def _normalize_batch_folder(batch_folder):
     return folder
 
 
+def _windows_natural_sort_key(value):
+    """Cross-platform approximation of Explorer's numeric filename ordering."""
+    text = str(value).replace("\\", "/")
+    parts = []
+    for part in re.split(r"(\d+)", text):
+        if part.isdecimal():
+            # Explorer places a zero-padded spelling first when numeric values
+            # match ("02" before "2"). Negative length mirrors that tie-break.
+            parts.append((1, int(part), -len(part)))
+        else:
+            parts.append((0, part.casefold()))
+    return tuple(parts), text.casefold(), text
+
+
 def _batch_relevant_files(root):
     relevant_extensions = BATCH_PROMPT_EXTENSIONS | BATCH_MEDIA_EXTENSIONS
     try:
@@ -248,7 +262,10 @@ def _batch_relevant_files(root):
         ]
     except OSError as error:
         raise ValueError(f"Could not scan folder batch path '{root}': {error}") from error
-    return sorted(files, key=lambda path: path.relative_to(root).as_posix().casefold())
+    return sorted(
+        files,
+        key=lambda path: _windows_natural_sort_key(path.relative_to(root).as_posix()),
+    )
 
 
 def _batch_media_entries(root, folder):
@@ -261,7 +278,7 @@ def _batch_media_entries(root, folder):
     try:
         direct_files = sorted(
             (path for path in folder.iterdir() if path.is_file()),
-            key=lambda path: path.name.casefold(),
+            key=lambda path: _windows_natural_sort_key(path.name),
         )
     except OSError as error:
         raise ValueError(f"Could not inspect folder batch directory '{folder}': {error}") from error
@@ -402,7 +419,8 @@ def _merge_output_prefix(root, folder):
     ]
     if not folder_parts:
         folder_parts = ["root"]
-    return "/".join(["video", "MiniMax_H3_Merged", root_name, *folder_parts, "merged"])
+    folder_name = "_".join(folder_parts)
+    return f"video/MiniMax_H3_Merged_{root_name}_{folder_name}"
 
 
 def _write_concat_manifest(path, video_paths):
@@ -1096,11 +1114,11 @@ class SECoursesReferenceGallery:
                 }),
                 "batch_folder": ("STRING", {
                     "default": "",
-                    "tooltip": "Optional local folder containing UTF-8 .txt prompts. Every prompt is processed in sorted order. Media beside each prompt is used as that prompt's references; when that folder has no media, the gallery attachments are used as fallback references. Subfolders are scanned recursively but never share media with each other.",
+                    "tooltip": "Optional local folder containing UTF-8 .txt prompts. Prompts and reference media use Windows-style natural filename order on every OS (1, 2, 10), so that order determines @image1, @image2, and the other numbered slots. Media beside each prompt is used as that prompt's references; when that folder has no media, the gallery attachments are used as fallback references. Subfolders are scanned recursively but never share media with each other.",
                 }),
                 "merge_batch_videos": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "When Folder batch is active, also concatenate the generated videos in each prompt directory. Every directory gets its own merged MP4; only the last merged MP4 is previewed.",
+                    "tooltip": "When Folder batch is active, also concatenate the generated videos in each prompt directory. Merged files are saved beside the individual clips in output/video, and the complete last merged MP4 is previewed.",
                 }),
             }
         }
@@ -1111,7 +1129,7 @@ class SECoursesReferenceGallery:
     OUTPUT_IS_LIST = (True, True, True, True)
     OUTPUT_TOOLTIPS = (
         "Every gallery reference bundled in upload order, ready for a model adapter node such as 'MiniMax H3 References (Gallery)'.",
-        "The prompt exactly as typed, or one output per sorted .txt file when Folder batch is active.",
+        "The prompt exactly as typed, or one output per naturally ordered .txt file when Folder batch is active.",
         "True for folder-batch items and false for the normal single prompt.",
         "True for every folder-batch item when the adjacent Merge videos toggle is enabled.",
     )
@@ -1262,8 +1280,8 @@ class SECoursesBatchVideoMerge:
     DESCRIPTION = (
         "Optionally concatenates generated MiniMax H3 folder-batch videos without changing the normal per-prompt "
         "Save Video output. Videos are grouped by the directory containing their .txt prompts and saved under "
-        "output/video/MiniMax_H3_Merged. Every directory receives one merged MP4, while the node previews only "
-        "the last merged MP4."
+        "output/video alongside the individual clips. Every directory receives one merged MP4, while the node "
+        "previews only the last merged MP4."
     )
 
     def merge(self, video, references, merge_batch_videos):
@@ -1288,7 +1306,11 @@ class SECoursesBatchVideoMerge:
                 flush=True,
             )
 
-        return {"ui": {"gifs": [saved[-1]]}}
+        preview = {
+            key: saved[-1][key]
+            for key in ("filename", "subfolder", "type")
+        }
+        return {"ui": {"images": [preview], "animated": (True,)}}
 
 
 class SECoursesMiniMaxH3References:

@@ -37,7 +37,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     and additionally concatenates videos from each prompt directory into one
     MP4. A batch with no subfolders produces one root merge; batches with
     multiple prompt directories produce one merge per directory. Only the
-    final merged MP4 is shown in the merge node preview.
+    final merged MP4 is shown in the merge node preview. Both individual and
+    merged outputs stay in `output/video`; nothing is written into the batch
+    input tree, where media files are treated as references. Prompt and media
+    filenames use Windows-style natural ordering (`1`, `2`, `10`) on Windows
+    and Linux alike; that order assigns `@image1`, `@image2`, and the other
+    numbered reference slots.
   - Video soundtracks take the first native audio slots. With `@video1` and
     standalone `@audio1` attached, use `<Audio 1>` for `@video1`'s soundtrack;
     `@audio1` remains the standalone file and is translated to `<Audio 2>`.
@@ -72,9 +77,8 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
 
 - **Merge MiniMax H3 Folder Batch Videos** is the optional output companion
   used by the video presets. It groups generated videos using the gallery's
-  validated batch metadata and saves merged MP4s under
-  `output/video/MiniMax_H3_Merged/`, while the existing Save Video node keeps
-  saving every individual generation as before.
+  validated batch metadata and saves flat `MiniMax_H3_Merged_*.mp4` files in
+  `output/video`, beside the individual generations saved by Save Video.
 
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.

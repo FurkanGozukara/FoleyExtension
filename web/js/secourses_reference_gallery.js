@@ -245,7 +245,7 @@ class ReferenceGalleryUI {
 
         this.mergeToggle = document.createElement("label");
         this.mergeToggle.className = "secourses-refgal-mergetoggle";
-        this.mergeToggle.title = "Also create one merged MP4 for each prompt directory. Existing per-prompt videos are unchanged; only the last merged MP4 is previewed.";
+        this.mergeToggle.title = "Also create one merged MP4 for each prompt directory beside the individual clips in output/video. Existing per-prompt videos are unchanged, and the complete last merged MP4 is previewed.";
         this.mergeCheckbox = document.createElement("input");
         this.mergeCheckbox.type = "checkbox";
         this.mergeCheckbox.setAttribute("role", "switch");
