@@ -1489,7 +1489,8 @@ class SECoursesBatchAudioSaveMerge:
         }
 
     CATEGORY = "SECourses/audio"
-    RETURN_TYPES = ()
+    RETURN_TYPES = ("AUDIO",)
+    RETURN_NAMES = ("audio",)
     INPUT_IS_LIST = True
     OUTPUT_NODE = True
     FUNCTION = "save_and_merge"
@@ -1534,12 +1535,17 @@ class SECoursesBatchAudioSaveMerge:
                     flush=True,
                 )
 
-        displayed = [merged_saved[-1]] if merged_saved else individual_saved
+        if merged_saved:
+            displayed = [merged_saved[-1]]
+            display_audio = _concatenate_batch_audio(groups[-1]["audios"])
+        else:
+            displayed = individual_saved
+            display_audio = audio[-1]
         preview = [
             {key: result[key] for key in ("filename", "subfolder", "type")}
             for result in displayed
         ]
-        return {"ui": {"audio": preview}}
+        return {"ui": {"audio": preview}, "result": (display_audio,)}
 
 
 class SECoursesMiniMaxH3References:

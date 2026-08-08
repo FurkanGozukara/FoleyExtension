@@ -128,6 +128,7 @@ class BatchAudioMergeTests(unittest.TestCase):
         with (
             mock.patch.object(gallery, "_save_audio_output", side_effect=fake_save) as save,
             mock.patch.object(gallery, "_merge_batch_audio_group", side_effect=fake_merge) as merge,
+            mock.patch.object(gallery, "_concatenate_batch_audio", return_value="merged_audio_b"),
         ):
             result = gallery.SECoursesBatchAudioSaveMerge().save_and_merge(
                 ["clip_a", "clip_b"], packs, [True, True], ["audio/individual"]
@@ -140,6 +141,7 @@ class BatchAudioMergeTests(unittest.TestCase):
             "subfolder": "audio",
             "type": "output",
         }])
+        self.assertEqual(result["result"], ("merged_audio_b",))
 
     def test_combined_output_returns_individuals_when_merge_is_disabled(self):
         def fake_save(clip, prefix):
@@ -163,6 +165,11 @@ class BatchAudioMergeTests(unittest.TestCase):
             [item["filename"] for item in result["ui"]["audio"]],
             ["clip_a.flac", "clip_b.flac"],
         )
+        self.assertEqual(result["result"], ("clip_b",))
+
+    def test_combined_output_exposes_audio_to_the_result_node(self):
+        self.assertEqual(gallery.SECoursesBatchAudioSaveMerge.RETURN_TYPES, ("AUDIO",))
+        self.assertEqual(gallery.SECoursesBatchAudioSaveMerge.RETURN_NAMES, ("audio",))
 
 
 if __name__ == "__main__":

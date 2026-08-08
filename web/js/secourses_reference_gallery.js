@@ -21,6 +21,7 @@ import { api } from "../../../scripts/api.js";
 import { resolveConfiguredPrompt } from "./secourses_reference_gallery_state.mjs";
 
 const NODE_CLASS = "SECoursesReferenceGallery";
+const AUDIO_RESULT_CLASS = "SECoursesBatchAudioSaveMerge";
 const UPLOAD_SUBFOLDER = "reference_gallery";
 const REORDER_MIME = "application/x-secourses-reference";
 
@@ -1346,6 +1347,10 @@ app.registerExtension({
         document.head.appendChild(link);
     },
     beforeRegisterNodeDef(nodeType, nodeData) {
+        if (nodeData.name === AUDIO_RESULT_CLASS) {
+            nodeData.input.required.audioUI = ["AUDIO_UI", {}];
+            return;
+        }
         if (nodeData.name !== NODE_CLASS) return;
         chainCallback(nodeType.prototype, "onNodeCreated", function () {
             this.__refGallery = new ReferenceGalleryUI(this);
