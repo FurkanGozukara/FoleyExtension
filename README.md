@@ -33,13 +33,15 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   - Token aliases: `@img1`, `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`,
     and `@image#1` all work.
   - **Optional folder batch** uses a two-line, wrapping local-path field. The
-    adjacent merge toggle leaves the normal per-prompt outputs intact and
-    additionally concatenates each prompt directory. Video presets produce an
-    MP4 in `output/video`; the audio-only preset produces a lossless FLAC in
+    frontend queues each prompt as a separate job in natural order. Each job is
+    fully generated, decoded, and saved before the next job starts. The adjacent
+    merge toggle retains those per-prompt files and, after the final job, also
+    concatenates each prompt directory. Video presets produce MP4 files in
+    `output/video`; the audio-only preset produces lossless FLAC files in
     `output/audio`. A batch with no subfolders produces one root merge, while
     multiple prompt directories produce one merge per directory. Only the
-    complete final merge is previewed. Nothing is written into the batch input
-    tree, where media files are treated as references. Prompt and media
+    complete final merge is returned and previewed. Nothing is written into the
+    batch input tree, where media files are treated as references. Prompt and media
     filenames use Windows-style natural ordering (`1`, `2`, `10`) on Windows
     and Linux alike; that order assigns `@image1`, `@image2`, and the other
     numbered reference slots.
@@ -75,17 +77,18 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   current prompt has no media and Ref2VA when it does. This also works per item
   in recursive folder batches.
 
-- **Merge MiniMax H3 Folder Batch Videos** is the optional output companion
-  used by the video presets. It groups generated videos using the gallery's
-  validated batch metadata and saves flat `MiniMax_H3_Merged_*.mp4` files in
-  `output/video`, beside the individual generations saved by Save Video.
+- **Save + Merge MiniMax H3 Folder Batch Videos** is the video presets' single
+  result node. It saves the current individual MP4 before the next queued prompt
+  starts. On the final job it groups those saved files using the gallery's
+  validated metadata, writes flat `MiniMax_H3_Merged_*.mp4` files in
+  `output/video`, and returns the complete last merge.
 
 - **Save + Merge MiniMax H3 Folder Batch Audio** is the audio preset's single
-  result node. It saves all individual lossless FLACs, optionally writes flat
-  `MiniMax_H3_Audio_Merged_*.flac` files in `output/audio`, and returns only
-  the complete final merge through the result node's audio output and player
-  when merging is enabled. The same merged file appears in Job Queue. Using one
-  result node prevents an individual Save Audio preview from replacing it.
+  result node. It saves the current lossless FLAC before the next queued prompt
+  starts, optionally writes flat `MiniMax_H3_Audio_Merged_*.flac` files in
+  `output/audio` after the final job, and returns only the complete final merge
+  through the result node's audio output and player. The same merged file appears
+  in Job Queue.
 
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.

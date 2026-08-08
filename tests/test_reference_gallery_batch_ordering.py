@@ -49,6 +49,16 @@ class BatchFilenameOrderingTests(unittest.TestCase):
             ["scene1/prompt.txt", "scene2/prompt.txt", "scene10/prompt.txt"],
         )
 
+    def test_prompt_files_use_windows_numeric_filename_order(self):
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            for name in ("10.txt", "2.txt", "1.txt"):
+                (root / name).touch()
+
+            files = gallery._batch_prompt_files(root)
+
+        self.assertEqual([path.name for path in files], ["1.txt", "2.txt", "10.txt"])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -11,6 +11,12 @@ import reference_gallery_nodes as gallery
 
 
 class BatchVideoMergeTests(unittest.TestCase):
+    def setUp(self):
+        gallery._BATCH_OUTPUT_SESSIONS["video"].clear()
+
+    def tearDown(self):
+        gallery._BATCH_OUTPUT_SESSIONS["video"].clear()
+
     def test_groups_by_prompt_directory_and_sorts_by_batch_index(self):
         videos = ["scene_b_2", "scene_a_1", "scene_b_1"]
         packs = [
@@ -97,6 +103,86 @@ class BatchVideoMergeTests(unittest.TestCase):
 
         self.assertEqual(result[2], [True, True])
         self.assertEqual(result[3], [True, True])
+
+    def test_gallery_selects_one_sequential_prompt_per_queued_job(self):
+        packs = (
+            [
+                {"batch": {"folder": "root", "prompt_file": "1.txt", "index": 1, "count": 2}},
+                {"batch": {"folder": "root", "prompt_file": "2.txt", "index": 2, "count": 2}},
+            ],
+            ["one", "two"],
+        )
+        with mock.patch.object(gallery, "_collect_folder_batch", return_value=packs):
+            result = gallery.SECoursesReferenceGallery().collect(
+                "fallback",
+                "{}",
+                24,
+                15,
+                "C:/batch",
+                True,
+                "run_12345678",
+                1,
+                2,
+            )
+
+        self.assertEqual(result[1], ["two"])
+        self.assertEqual(result[0][0]["batch"]["run_id"], "run_12345678")
+        self.assertTrue(result[0][0]["batch"]["sequential"])
+
+    def test_combined_video_output_saves_each_job_then_merges_on_final_job(self):
+        events = []
+
+        def fake_save(clip, prefix, prompt, extra):
+            events.append(f"save:{clip}")
+            return {
+                "filename": f"{clip}.mp4",
+                "subfolder": "video",
+                "type": "output",
+                "fullpath": f"C:/output/{clip}.mp4",
+            }
+
+        def fake_merge(group):
+            events.append("merge:" + ",".join(group["videos"]))
+            return {
+                "filename": "merged.mp4",
+                "subfolder": "video",
+                "type": "output",
+                "fullpath": "C:/output/merged.mp4",
+            }
+
+        pack_one = {"batch": {
+            "root": "C:/batch", "folder": "root", "index": 1, "count": 2,
+            "run_id": "run_12345678", "sequential": True,
+        }}
+        pack_two = {"batch": {
+            "root": "C:/batch", "folder": "root", "index": 2, "count": 2,
+            "run_id": "run_12345678", "sequential": True,
+        }}
+
+        with (
+            mock.patch.object(gallery, "_save_video_output", side_effect=fake_save),
+            mock.patch.object(gallery, "_merge_saved_video_group", side_effect=fake_merge),
+            mock.patch.object(gallery, "_video_from_saved_output", side_effect=lambda item: item["filename"]),
+        ):
+            first = gallery.SECoursesBatchVideoSaveMerge().save_and_merge(
+                ["clip_1"], [pack_one], [True], ["video/MiniMax_H3"]
+            )
+            second = gallery.SECoursesBatchVideoSaveMerge().save_and_merge(
+                ["clip_2"], [pack_two], [True], ["video/MiniMax_H3"]
+            )
+
+        self.assertEqual(first["ui"]["images"][0]["filename"], "clip_1.mp4")
+        self.assertEqual(second["ui"]["images"][0]["filename"], "merged.mp4")
+        self.assertEqual(second["result"], ("merged.mp4",))
+        self.assertEqual(events, [
+            "save:clip_1",
+            "save:clip_2",
+            "merge:C:/output/clip_1.mp4,C:/output/clip_2.mp4",
+        ])
+
+    def test_combined_video_output_exposes_video_result(self):
+        self.assertEqual(gallery.SECoursesBatchVideoSaveMerge.RETURN_TYPES, ("VIDEO",))
+        self.assertEqual(gallery.SECoursesBatchVideoSaveMerge.RETURN_NAMES, ("video",))
 
 
 if __name__ == "__main__":

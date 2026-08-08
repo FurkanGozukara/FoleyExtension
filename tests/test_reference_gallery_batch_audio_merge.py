@@ -13,6 +13,12 @@ import reference_gallery_nodes as gallery
 
 
 class BatchAudioMergeTests(unittest.TestCase):
+    def setUp(self):
+        gallery._BATCH_OUTPUT_SESSIONS["audio"].clear()
+
+    def tearDown(self):
+        gallery._BATCH_OUTPUT_SESSIONS["audio"].clear()
+
     def test_groups_audio_by_prompt_directory_in_prompt_order(self):
         groups = gallery._batch_audio_merge_groups(
             ["b2", "a1", "b1"],
@@ -170,6 +176,57 @@ class BatchAudioMergeTests(unittest.TestCase):
     def test_combined_output_exposes_audio_to_the_result_node(self):
         self.assertEqual(gallery.SECoursesBatchAudioSaveMerge.RETURN_TYPES, ("AUDIO",))
         self.assertEqual(gallery.SECoursesBatchAudioSaveMerge.RETURN_NAMES, ("audio",))
+
+    def test_sequential_audio_saves_each_job_then_merges_saved_files(self):
+        events = []
+
+        def fake_save(clip, prefix):
+            events.append(f"save:{clip}")
+            return {
+                "filename": f"{clip}.flac",
+                "subfolder": "audio",
+                "type": "output",
+                "fullpath": f"C:/output/{clip}.flac",
+            }
+
+        def fake_merge(group):
+            events.append("merge:" + ",".join(group["audios"]))
+            return {
+                "filename": "merged.flac",
+                "subfolder": "audio",
+                "type": "output",
+                "fullpath": "C:/output/merged.flac",
+            }
+
+        pack_one = {"batch": {
+            "root": "C:/batch", "folder": "root", "index": 1, "count": 2,
+            "run_id": "run_12345678", "sequential": True,
+        }}
+        pack_two = {"batch": {
+            "root": "C:/batch", "folder": "root", "index": 2, "count": 2,
+            "run_id": "run_12345678", "sequential": True,
+        }}
+
+        with (
+            mock.patch.object(gallery, "_save_audio_output", side_effect=fake_save),
+            mock.patch.object(gallery, "_merge_saved_audio_group", side_effect=fake_merge),
+            mock.patch.object(gallery, "_load_saved_audio_output", return_value="merged_audio"),
+        ):
+            first = gallery.SECoursesBatchAudioSaveMerge().save_and_merge(
+                ["clip_1"], [pack_one], [True], ["audio/individual"]
+            )
+            second = gallery.SECoursesBatchAudioSaveMerge().save_and_merge(
+                ["clip_2"], [pack_two], [True], ["audio/individual"]
+            )
+
+        self.assertEqual(first["ui"]["audio"][0]["filename"], "clip_1.flac")
+        self.assertEqual(second["ui"]["audio"][0]["filename"], "merged.flac")
+        self.assertEqual(second["result"], ("merged_audio",))
+        self.assertEqual(events, [
+            "save:clip_1",
+            "save:clip_2",
+            "merge:C:/output/clip_1.flac,C:/output/clip_2.flac",
+        ])
 
 
 if __name__ == "__main__":

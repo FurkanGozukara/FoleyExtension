@@ -18,12 +18,24 @@
 
 import { app } from "../../../scripts/app.js";
 import { api } from "../../../scripts/api.js";
+import {
+    buildSequentialBatchPlan,
+    createBatchRunId,
+    folderBatchTargets,
+    injectSequentialBatchItem,
+    supportsSequentialFolderQueue,
+} from "./secourses_folder_batch_queue.mjs";
 import { resolveConfiguredPrompt } from "./secourses_reference_gallery_state.mjs";
 
 const NODE_CLASS = "SECoursesReferenceGallery";
 const AUDIO_RESULT_CLASS = "SECoursesBatchAudioSaveMerge";
+const VIDEO_RESULT_CLASS = "SECoursesBatchVideoSaveMerge";
+const QUEUE_ONLY_INPUTS = ["batch_run_id", "batch_item_index", "batch_item_count"];
 const UPLOAD_SUBFOLDER = "reference_gallery";
 const REORDER_MIME = "application/x-secourses-reference";
+
+let sequentialQueueState = null;
+let sequentialQueueInstalled = false;
 
 /** Per-type '@' aliases, limits, and pill palettes, matching the SwarmUI extension. */
 const REFERENCE_TYPES = {
@@ -102,6 +114,85 @@ function notify(severity, summary, detail) {
         console.warn(`[SECoursesReferenceGallery] ${summary}: ${detail}`);
         if (severity === "error") alert(`${summary}\n${detail}`);
     }
+}
+
+async function inspectFolderBatch(batchFolder) {
+    const response = await api.fetchApi("/secourses/folder_batch/inspect", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ batch_folder: batchFolder }),
+    });
+    const payload = await response.json().catch(() => ({}));
+    if (!response.ok) {
+        throw new Error(payload.error || `Folder batch inspection failed (${response.status}).`);
+    }
+    return payload;
+}
+
+function installSequentialFolderQueue() {
+    if (sequentialQueueInstalled) return;
+    sequentialQueueInstalled = true;
+
+    const originalGraphToPrompt = app.graphToPrompt.bind(app);
+    const originalQueuePrompt = app.queuePrompt.bind(app);
+
+    app.graphToPrompt = async function () {
+        const prompt = await originalGraphToPrompt(...arguments);
+        const state = sequentialQueueState;
+        if (state && state.cursor < state.plan.length) {
+            injectSequentialBatchItem(
+                prompt.output,
+                state.targetNodeIds,
+                state.plan[state.cursor],
+            );
+            state.cursor += 1;
+        }
+        return prompt;
+    };
+
+    app.queuePrompt = async function (number, batchCount = 1, queueNodeIds) {
+        if (sequentialQueueState || queueNodeIds?.length) {
+            return originalQueuePrompt(number, batchCount, queueNodeIds);
+        }
+
+        const snapshot = await originalGraphToPrompt();
+        const targets = folderBatchTargets(snapshot.output);
+        if (!targets.length || !supportsSequentialFolderQueue(snapshot.output)) {
+            return originalQueuePrompt(number, batchCount, queueNodeIds);
+        }
+
+        const folders = [...new Set(targets.map((target) => target.batchFolder))];
+        if (folders.length !== 1) {
+            notify(
+                "error",
+                "Folder batch queue stopped",
+                "A workflow can sequentially process only one folder path at a time.",
+            );
+            return false;
+        }
+
+        try {
+            const inspection = await inspectFolderBatch(folders[0]);
+            const plan = buildSequentialBatchPlan(
+                inspection.count,
+                Number(batchCount ?? 1),
+                createBatchRunId,
+            );
+            sequentialQueueState = {
+                cursor: 0,
+                plan,
+                targetNodeIds: targets.map((target) => target.nodeId),
+            };
+            // A normal append queue gives every item a monotonically increasing
+            // server priority. This guarantees item 1 saves before item 2 starts.
+            return await originalQueuePrompt(0, plan.length, queueNodeIds);
+        } catch (error) {
+            notify("error", "Folder batch queue stopped", String(error?.message || error));
+            return false;
+        } finally {
+            sequentialQueueState = null;
+        }
+    };
 }
 
 function viewURL(annotated) {
@@ -246,7 +337,7 @@ class ReferenceGalleryUI {
 
         this.mergeToggle = document.createElement("label");
         this.mergeToggle.className = "secourses-refgal-mergetoggle";
-        this.mergeToggle.title = "Also create one merged MP4 for each prompt directory beside the individual clips in output/video. Existing per-prompt videos are unchanged, and the complete last merged MP4 is previewed.";
+        this.mergeToggle.title = "Save each prompt's MP4 before the next queued prompt starts, then create one merged MP4 per prompt directory after the final job. The complete last merge is returned.";
         this.mergeCheckbox = document.createElement("input");
         this.mergeCheckbox.type = "checkbox";
         this.mergeCheckbox.setAttribute("role", "switch");
@@ -580,19 +671,21 @@ class ReferenceGalleryUI {
         const hasAudio = targetTypes.some((type) =>
             type === "SECoursesBatchAudioMerge" || type === "SECoursesBatchAudioSaveMerge"
         );
-        const hasVideo = targetTypes.includes("SECoursesBatchVideoMerge");
+        const hasVideo = targetTypes.some((type) =>
+            type === "SECoursesBatchVideoMerge" || type === VIDEO_RESULT_CLASS
+        );
         if (hasAudio && !hasVideo) {
             this.mergeLabel.textContent = "Merge audio";
             this.mergeCheckbox.setAttribute("aria-label", "Merge audio");
-            this.mergeToggle.title = "Also create one merged lossless FLAC for each prompt directory after saving every individual clip. Merged files stay in output/audio, and the complete last merged FLAC is previewed.";
+            this.mergeToggle.title = "Save each prompt's FLAC before the next queued prompt starts, then create one lossless merged FLAC per prompt directory after the final job. The complete last merge is returned.";
         } else if (hasAudio && hasVideo) {
             this.mergeLabel.textContent = "Merge outputs";
             this.mergeCheckbox.setAttribute("aria-label", "Merge outputs");
-            this.mergeToggle.title = "Also merge the generated video and audio outputs for each prompt directory after their individual files are saved.";
+            this.mergeToggle.title = "Save each prompt's outputs before the next queued prompt starts, then merge each prompt directory after the final job.";
         } else {
             this.mergeLabel.textContent = "Merge videos";
             this.mergeCheckbox.setAttribute("aria-label", "Merge videos");
-            this.mergeToggle.title = "Also create one merged MP4 for each prompt directory beside the individual clips in output/video. Existing per-prompt videos are unchanged, and the complete last merged MP4 is previewed.";
+            this.mergeToggle.title = "Save each prompt's MP4 before the next queued prompt starts, then create one merged MP4 per prompt directory after the final job. The complete last merge is returned.";
         }
         this.mergeToggle.hidden = !available;
         this.mergeCheckbox.disabled = !available;
@@ -1346,12 +1439,18 @@ app.registerExtension({
         link.href = new URL("./secourses_reference_gallery.css", import.meta.url).href;
         document.head.appendChild(link);
     },
+    setup() {
+        installSequentialFolderQueue();
+    },
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name === AUDIO_RESULT_CLASS) {
             nodeData.input.required.audioUI = ["AUDIO_UI", {}];
             return;
         }
         if (nodeData.name !== NODE_CLASS) return;
+        for (const inputName of QUEUE_ONLY_INPUTS) {
+            delete nodeData.input?.optional?.[inputName];
+        }
         chainCallback(nodeType.prototype, "onNodeCreated", function () {
             this.__refGallery = new ReferenceGalleryUI(this);
         });

@@ -12,9 +12,11 @@ Two nodes cooperate to replace banks of LoadImage / LoadVideo / LoadAudio nodes:
   rewrites ``@image1`` / ``@video1`` / ``@audio1`` prompt tokens into the
   ``<Picture i>`` / ``<Video k>`` / ``<Audio j>`` labels the model expects and
   then defers to ComfyUI's own ``MiniMaxH3ReferenceToVideo`` implementation.
-- ``SECoursesBatchVideoMerge`` optionally gathers the mapped folder-batch
-  videos, concatenates one MP4 per prompt directory, and previews only the
-  final merged file while the normal Save Video node remains unchanged.
+- ``SECoursesBatchVideoSaveMerge`` saves each sequential folder-batch item as
+  soon as its own queued execution finishes, then concatenates one MP4 per
+  prompt directory after the final item and previews the last complete merge.
+- ``SECoursesBatchVideoMerge`` remains available for older workflows that use
+  ComfyUI's list-style folder batching.
 - ``SECoursesBatchAudioMerge`` does the same for the audio-only preset,
   concatenating lossless waveform data and saving one FLAC per directory after
   the individual audio clips have been saved.
@@ -35,6 +37,8 @@ import json
 import math
 import os
 import re
+import threading
+import time
 import warnings
 from pathlib import Path
 
@@ -64,6 +68,10 @@ BATCH_AUDIO_EXTENSIONS = {".wav", ".mp3", ".aac", ".ogg", ".flac", ".m4a", ".opu
 BATCH_MEDIA_EXTENSIONS = BATCH_IMAGE_EXTENSIONS | BATCH_VIDEO_EXTENSIONS | BATCH_AUDIO_EXTENSIONS
 BATCH_MAX_PROMPTS = 1000
 BATCH_MAX_PROMPT_BYTES = 1024 * 1024
+BATCH_SESSION_TTL_SECONDS = 6 * 60 * 60
+
+_BATCH_SESSION_LOCK = threading.Lock()
+_BATCH_OUTPUT_SESSIONS = {"video": {}, "audio": {}}
 
 # One entry per '@' alias, canonicalized: @img2 == @image2, @pic1 == @picture1 == @image1.
 TOKEN_MATCHER = re.compile(
@@ -274,6 +282,62 @@ def _batch_relevant_files(root):
     )
 
 
+def _batch_prompt_files(root):
+    prompt_files = [
+        path for path in _batch_relevant_files(root)
+        if path.suffix.lower() in BATCH_PROMPT_EXTENSIONS
+    ]
+    if not prompt_files:
+        raise ValueError(f"Folder batch path contains no .txt prompt files: {root}")
+    if len(prompt_files) > BATCH_MAX_PROMPTS:
+        raise ValueError(
+            f"Folder batch path contains {len(prompt_files)} prompt files; "
+            f"the safety limit is {BATCH_MAX_PROMPTS}."
+        )
+    return prompt_files
+
+
+def _inspect_folder_batch(batch_folder):
+    root = _normalize_batch_folder(batch_folder)
+    if root is None:
+        raise ValueError("Folder batch path is empty.")
+    prompt_files = _batch_prompt_files(root)
+    folders = {
+        path.parent.relative_to(root).as_posix()
+        for path in prompt_files
+    }
+    return {
+        "count": len(prompt_files),
+        "folders": len(folders),
+    }
+
+
+def _register_folder_batch_inspect_route():
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except ImportError:
+        return
+
+    server = getattr(PromptServer, "instance", None)
+    if server is None:
+        return
+    marker = "_secourses_folder_batch_inspect_registered"
+    if getattr(server, marker, False):
+        return
+
+    @server.routes.post("/secourses/folder_batch/inspect")
+    async def inspect_folder_batch(request):
+        try:
+            payload = await request.json()
+            result = _inspect_folder_batch(payload.get("batch_folder", ""))
+        except (ValueError, OSError, json.JSONDecodeError) as error:
+            return web.json_response({"error": str(error)}, status=400)
+        return web.json_response(result)
+
+    setattr(server, marker, True)
+
+
 def _batch_media_entries(root, folder):
     by_kind = {"images": [], "videos": [], "audios": []}
     kinds = (
@@ -327,23 +391,18 @@ def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_second
     if root is None:
         return None
 
-    prompt_files = [
-        path for path in _batch_relevant_files(root)
-        if path.suffix.lower() in BATCH_PROMPT_EXTENSIONS
-    ]
-    if not prompt_files:
-        raise ValueError(f"Folder batch path contains no .txt prompt files: {root}")
-    if len(prompt_files) > BATCH_MAX_PROMPTS:
-        raise ValueError(
-            f"Folder batch path contains {len(prompt_files)} prompt files; "
-            f"the safety limit is {BATCH_MAX_PROMPTS}."
-        )
+    prompt_files = _batch_prompt_files(root)
+    folder_counts = {}
+    for prompt_path in prompt_files:
+        folder_counts[prompt_path.parent] = folder_counts.get(prompt_path.parent, 0) + 1
 
     folder_media = {}
+    folder_indexes = {}
     packs = []
     prompts = []
     for index, prompt_path in enumerate(prompt_files, start=1):
         folder = prompt_path.parent
+        folder_indexes[folder] = folder_indexes.get(folder, 0) + 1
         if folder not in folder_media:
             folder_media[folder] = _batch_media_entries(root, folder)
         media = folder_media[folder]
@@ -367,6 +426,8 @@ def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_second
                 "prompt_file": prompt_path.name,
                 "index": index,
                 "count": len(prompt_files),
+                "folder_index": folder_indexes[folder],
+                "folder_count": folder_counts[folder],
                 "uses_folder_media": bool(media_count),
             },
         })
@@ -415,6 +476,82 @@ def _batch_video_merge_groups(videos, reference_packs):
 
 def _batch_audio_merge_groups(audios, reference_packs):
     return _batch_output_merge_groups(audios, reference_packs, "audios")
+
+
+def _sequential_batch_item(pack):
+    batch = pack.get("batch") if isinstance(pack, dict) else None
+    if not isinstance(batch, dict) or not batch.get("sequential"):
+        return None
+    run_id = str(batch.get("run_id") or "")
+    if not re.fullmatch(r"[0-9A-Za-z_-]{8,128}", run_id):
+        raise ValueError("Folder batch sequential run ID is invalid.")
+    try:
+        index = int(batch["index"])
+        count = int(batch["count"])
+    except (KeyError, TypeError, ValueError) as error:
+        raise ValueError("Folder batch sequential metadata is incomplete.") from error
+    if count < 1 or index < 1 or index > count:
+        raise ValueError(
+            f"Folder batch sequential item {index} is outside the expected 1-{count} range."
+        )
+    return run_id, index, count
+
+
+def _prune_batch_output_sessions(now):
+    for sessions in _BATCH_OUTPUT_SESSIONS.values():
+        expired = [
+            run_id for run_id, session in sessions.items()
+            if now - session["updated"] > BATCH_SESSION_TTL_SECONDS
+        ]
+        for run_id in expired:
+            sessions.pop(run_id, None)
+
+
+def _accumulate_sequential_output(kind, value, pack):
+    """Collects saved file paths across separately queued prompt executions."""
+    item = _sequential_batch_item(pack)
+    if item is None:
+        return None
+    if kind not in _BATCH_OUTPUT_SESSIONS:
+        raise ValueError(f"Unsupported folder batch output kind: {kind}")
+
+    run_id, index, count = item
+    now = time.monotonic()
+    with _BATCH_SESSION_LOCK:
+        _prune_batch_output_sessions(now)
+        sessions = _BATCH_OUTPUT_SESSIONS[kind]
+        session = sessions.setdefault(run_id, {
+            "count": count,
+            "items": {},
+            "updated": now,
+        })
+        if session["count"] != count:
+            sessions.pop(run_id, None)
+            raise ValueError(
+                "Folder batch changed after it was queued; run the folder batch again."
+            )
+        session["items"][index] = (value, pack)
+        session["updated"] = now
+        received = len(session["items"])
+        if received < count:
+            return {"complete": False, "received": received, "count": count}
+
+        missing = [item_index for item_index in range(1, count + 1) if item_index not in session["items"]]
+        if missing:
+            return {
+                "complete": False,
+                "received": received,
+                "count": count,
+                "missing": missing,
+            }
+        ordered = [session["items"][item_index] for item_index in range(1, count + 1)]
+        sessions.pop(run_id, None)
+
+    values = [item_value for item_value, _ in ordered]
+    packs = [item_pack for _, item_pack in ordered]
+    value_key = "videos" if kind == "video" else "audios"
+    groups = _batch_output_merge_groups(values, packs, value_key)
+    return {"complete": True, "received": count, "count": count, "groups": groups}
 
 
 def _safe_merge_output_component(value, fallback):
@@ -528,6 +665,80 @@ def _merge_batch_video_group(group):
     }
 
 
+def _save_video_output(video, filename_prefix, prompt=None, extra_pnginfo=None):
+    import folder_paths
+    from comfy_api.latest import Types
+
+    width, height = video.get_dimensions()
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        str(filename_prefix or "video/MiniMax_H3"),
+        folder_paths.get_output_directory(),
+        width,
+        height,
+    )
+    output_name = f"{filename}_{counter:05}_.mp4"
+    output_path = Path(full_output_folder) / output_name
+    metadata = {}
+    if isinstance(extra_pnginfo, dict):
+        metadata.update(extra_pnginfo)
+    if isinstance(prompt, dict):
+        metadata["prompt"] = prompt
+    video.save_to(
+        str(output_path),
+        format=Types.VideoContainer.MP4,
+        codec=Types.VideoCodec.H264,
+        metadata=metadata or None,
+    )
+    return {
+        "filename": output_name,
+        "subfolder": subfolder,
+        "type": "output",
+        "format": "video/mp4",
+        "fullpath": str(output_path),
+    }
+
+
+def _merge_saved_video_group(group):
+    import tempfile
+
+    import folder_paths
+    from imageio_ffmpeg import get_ffmpeg_exe
+
+    paths = [Path(path) for path in group["videos"]]
+    missing = [str(path) for path in paths if not path.is_file()]
+    if missing:
+        raise FileNotFoundError(
+            f"Folder batch could not merge missing saved video(s): {', '.join(missing)}"
+        )
+
+    prefix = _merge_output_prefix(group["root"], group["folder"])
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        prefix, folder_paths.get_output_directory()
+    )
+    output_name = f"{filename}_{counter:05}_.mp4"
+    output_path = Path(full_output_folder) / output_name
+    temp_root = Path(folder_paths.get_temp_directory())
+    temp_root.mkdir(parents=True, exist_ok=True)
+    with tempfile.TemporaryDirectory(prefix="secourses_h3_merge_", dir=temp_root) as temp_dir:
+        manifest_path = Path(temp_dir) / "concat.txt"
+        _write_concat_manifest(manifest_path, paths)
+        _run_ffmpeg_concat(get_ffmpeg_exe(), manifest_path, output_path)
+
+    return {
+        "filename": output_name,
+        "subfolder": subfolder,
+        "type": "output",
+        "format": "video/mp4",
+        "fullpath": str(output_path),
+    }
+
+
+def _video_from_saved_output(saved):
+    from comfy_api.latest import InputImpl
+
+    return InputImpl.VideoFromFile(saved["fullpath"])
+
+
 def _concatenate_batch_audio(audios):
     import torch
 
@@ -601,6 +812,37 @@ def _merge_batch_audio_group(group):
     merged = _concatenate_batch_audio(group["audios"])
     prefix = _merge_audio_output_prefix(group["root"], group["folder"])
     return _save_audio_output(merged, prefix)
+
+
+def _load_saved_audio_output(path):
+    import av
+    import torch
+
+    chunks = []
+    sample_rate = None
+    channels = None
+    with av.open(str(path), mode="r") as container:
+        if not container.streams.audio:
+            raise ValueError(f"Saved folder batch audio has no audio stream: {path}")
+        stream = container.streams.audio[0]
+        sample_rate = int(stream.codec_context.sample_rate or 0)
+        channels = int(stream.channels or 0)
+        if sample_rate < 1 or channels < 1:
+            raise ValueError(f"Saved folder batch audio has invalid stream metadata: {path}")
+        for frame in container.decode(streams=stream.index):
+            chunk = torch.from_numpy(frame.to_ndarray())
+            if chunk.shape[0] != channels:
+                chunk = chunk.view(-1, channels).t()
+            chunks.append(chunk)
+    if not chunks:
+        raise ValueError(f"Saved folder batch audio is empty: {path}")
+    waveform = _f32_pcm(torch.cat(chunks, dim=1))
+    return {"waveform": waveform[None,], "sample_rate": sample_rate}
+
+
+def _merge_saved_audio_group(group):
+    audios = [_load_saved_audio_output(path) for path in group["audios"]]
+    return _merge_batch_audio_group({**group, "audios": audios})
 
 
 def _resolve_reference_entry(entry):
@@ -1215,9 +1457,14 @@ class SECoursesReferenceGallery:
                 }),
                 "merge_batch_videos": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "When Folder batch is active, also concatenate the generated videos in each prompt directory. Merged files are saved beside the individual clips in output/video, and the complete last merged MP4 is previewed.",
+                    "tooltip": "When Folder batch is active, save each queued prompt before starting the next, then concatenate each prompt directory after the final job. The complete last merge is returned.",
                 }),
-            }
+            },
+            "optional": {
+                "batch_run_id": ("STRING", {"default": ""}),
+                "batch_item_index": ("INT", {"default": -1, "min": -1, "max": BATCH_MAX_PROMPTS - 1}),
+                "batch_item_count": ("INT", {"default": 0, "min": 0, "max": BATCH_MAX_PROMPTS}),
+            },
         }
 
     CATEGORY = "SECourses/references"
@@ -1228,7 +1475,7 @@ class SECoursesReferenceGallery:
         "Every gallery reference bundled in upload order, ready for a model adapter node such as 'MiniMax H3 References (Gallery)'.",
         "The prompt exactly as typed, or one output per naturally ordered .txt file when Folder batch is active.",
         "True for folder-batch items and false for the normal single prompt.",
-        "True for every folder-batch item when the adjacent Merge videos toggle is enabled.",
+        "True for every sequential folder job when the adjacent merge toggle is enabled.",
     )
     FUNCTION = "collect"
     DESCRIPTION = (
@@ -1237,24 +1484,63 @@ class SECoursesReferenceGallery:
         "'Load + trim' loader previews a video or audio file and selects a start/end window before adding it; "
         "only that window is decoded at generation time. Feed the references output into a model adapter node "
         "(eg 'MiniMax H3 References (Gallery)'). Media stays lazy until the adapter can apply its canvas, "
-        "duration, and memory limits. An optional folder path emits one item per recursively discovered .txt "
-        "prompt, using only media in that prompt's own directory and falling back to the gallery attachments "
-        "when the directory has no media. The adjacent toggle can additionally merge every directory's "
-        "generated videos into one MP4."
+        "duration, and memory limits. An optional folder path queues one complete job per recursively discovered "
+        ".txt prompt, saving each output before the next job starts. Media comes only from the prompt's own "
+        "directory, with gallery attachments as fallback. The adjacent toggle merges each directory after the "
+        "final job."
     )
 
-    def collect(self, prompt, references, video_fps, max_seconds, batch_folder="", merge_batch_videos=False):
+    def collect(
+        self,
+        prompt,
+        references,
+        video_fps,
+        max_seconds,
+        batch_folder="",
+        merge_batch_videos=False,
+        batch_run_id="",
+        batch_item_index=-1,
+        batch_item_count=0,
+    ):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
         folder_batch = _collect_folder_batch(batch_folder, manifest, video_fps, max_seconds)
         if folder_batch is not None:
             packs, prompts = folder_batch
+            run_id = str(batch_run_id or "").strip()
+            if run_id:
+                if not re.fullmatch(r"[0-9A-Za-z_-]{8,128}", run_id):
+                    raise ValueError("Folder batch sequential run ID is invalid.")
+                item_index = int(batch_item_index)
+                expected_count = int(batch_item_count)
+                if expected_count != len(packs):
+                    raise ValueError(
+                        "Folder batch changed after it was queued; run the folder batch again."
+                    )
+                if item_index < 0 or item_index >= len(packs):
+                    raise ValueError(
+                        f"Folder batch item index {item_index} is outside the expected "
+                        f"0-{len(packs) - 1} range."
+                    )
+                pack = packs[item_index]
+                pack["batch"]["run_id"] = run_id
+                pack["batch"]["sequential"] = True
+                packs = [pack]
+                prompts = [prompts[item_index]]
+                print(
+                    f"[SECoursesReferenceGallery] prepared sequential folder prompt "
+                    f"{item_index + 1}/{expected_count}: {pack['batch']['prompt_file']}",
+                    flush=True,
+                )
+            elif int(batch_item_index) >= 0 or int(batch_item_count) > 0:
+                raise ValueError("Folder batch sequential metadata is missing its run ID.")
             folders = len({pack["batch"]["folder"] for pack in packs})
-            print(
-                f"[SECoursesReferenceGallery] prepared {len(packs)} folder prompt(s) "
-                f"across {folders} unique folder(s)",
-                flush=True,
-            )
+            if not run_id:
+                print(
+                    f"[SECoursesReferenceGallery] prepared {len(packs)} folder prompt(s) "
+                    f"across {folders} unique folder(s)",
+                    flush=True,
+                )
             merge_flags = [bool(merge_batch_videos)] * len(packs)
             return (packs, prompts, [True] * len(packs), merge_flags)
 
@@ -1276,7 +1562,16 @@ class SECoursesReferenceGallery:
 
     @classmethod
     def IS_CHANGED(
-        cls, prompt, references, video_fps, max_seconds, batch_folder="", merge_batch_videos=False
+        cls,
+        prompt,
+        references,
+        video_fps,
+        max_seconds,
+        batch_folder="",
+        merge_batch_videos=False,
+        batch_run_id="",
+        batch_item_index=-1,
+        batch_item_count=0,
     ):
         digest = hashlib.sha256()
         digest.update(
@@ -1288,6 +1583,9 @@ class SECoursesReferenceGallery:
                     float(max_seconds),
                     str(batch_folder),
                     bool(merge_batch_videos),
+                    str(batch_run_id),
+                    int(batch_item_index),
+                    int(batch_item_count),
                 )
             ).encode("utf-8")
         )
@@ -1321,7 +1619,15 @@ class SECoursesReferenceGallery:
         return digest.hexdigest()
 
     @classmethod
-    def VALIDATE_INPUTS(cls, references, batch_folder="", merge_batch_videos=False):
+    def VALIDATE_INPUTS(
+        cls,
+        references,
+        batch_folder="",
+        merge_batch_videos=False,
+        batch_run_id="",
+        batch_item_index=-1,
+        batch_item_count=0,
+    ):
         try:
             manifest = _parse_manifest(references)
         except ValueError as error:
@@ -1329,17 +1635,17 @@ class SECoursesReferenceGallery:
         try:
             root = _normalize_batch_folder(batch_folder)
             if root is not None:
-                prompt_files = [
-                    path for path in _batch_relevant_files(root)
-                    if path.suffix.lower() in BATCH_PROMPT_EXTENSIONS
-                ]
-                if not prompt_files:
-                    return f"Folder batch path contains no .txt prompt files: {root}"
-                if len(prompt_files) > BATCH_MAX_PROMPTS:
-                    return (
-                        f"Folder batch path contains {len(prompt_files)} prompt files; "
-                        f"the safety limit is {BATCH_MAX_PROMPTS}."
-                    )
+                prompt_files = _batch_prompt_files(root)
+                run_id = str(batch_run_id or "").strip()
+                if run_id:
+                    if not re.fullmatch(r"[0-9A-Za-z_-]{8,128}", run_id):
+                        return "Folder batch sequential run ID is invalid."
+                    if int(batch_item_count) != len(prompt_files):
+                        return "Folder batch changed after it was queued; run the folder batch again."
+                    if int(batch_item_index) < 0 or int(batch_item_index) >= len(prompt_files):
+                        return "Folder batch sequential item index is outside the prompt list."
+                elif int(batch_item_index) >= 0 or int(batch_item_count) > 0:
+                    return "Folder batch sequential metadata is missing its run ID."
         except ValueError as error:
             return str(error)
         folder_paths = None
@@ -1350,6 +1656,130 @@ class SECoursesReferenceGallery:
                 if not folder_paths.exists_annotated_filepath(entry["file"]):
                     return f"Reference file not found: {entry['file']}. Re-add it in the gallery."
         return True
+
+
+class SECoursesBatchVideoSaveMerge:
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "video": ("VIDEO", {
+                    "tooltip": "The generated video. Folder batches are queued one prompt at a time so this file is written before the next prompt starts.",
+                }),
+                "references": (REF_PACK_TYPE, {
+                    "tooltip": "Folder and prompt-order metadata from SECourses Reference Gallery.",
+                }),
+                "merge_batch_videos": ("BOOLEAN", {
+                    "tooltip": "After the final queued prompt, merge the saved MP4 files once per prompt directory and return the last complete merge.",
+                }),
+                "filename_prefix": ("STRING", {"default": "video/MiniMax_H3"}),
+            },
+            "hidden": {
+                "prompt": "PROMPT",
+                "extra_pnginfo": "EXTRA_PNGINFO",
+            },
+        }
+
+    CATEGORY = "SECourses/video"
+    RETURN_TYPES = ("VIDEO",)
+    RETURN_NAMES = ("video",)
+    INPUT_IS_LIST = True
+    OUTPUT_NODE = True
+    FUNCTION = "save_and_merge"
+    DESCRIPTION = (
+        "Saves each MiniMax H3 folder prompt as its own MP4 before the next queued prompt starts. After the "
+        "last prompt, it concatenates the already-saved files once per prompt directory and returns only the "
+        "last complete merged MP4. Normal non-folder generations are saved exactly once."
+    )
+
+    @staticmethod
+    def _first(values, default=None):
+        if isinstance(values, (list, tuple)):
+            return values[0] if values else default
+        return values if values is not None else default
+
+    @staticmethod
+    def _preview(saved):
+        return {key: saved[key] for key in ("filename", "subfolder", "type")}
+
+    def save_and_merge(
+        self,
+        video,
+        references,
+        merge_batch_videos,
+        filename_prefix,
+        prompt=None,
+        extra_pnginfo=None,
+    ):
+        videos = list(video)
+        packs = list(references)
+        if len(videos) != len(packs):
+            raise ValueError(
+                "Folder batch video save received a different number of videos "
+                f"({len(videos)}) and reference packs ({len(packs)})."
+            )
+
+        prefix = self._first(filename_prefix, "video/MiniMax_H3")
+        prompt_value = self._first(prompt)
+        extra_value = self._first(extra_pnginfo)
+        saved = []
+        for clip in videos:
+            result = _save_video_output(clip, prefix, prompt_value, extra_value)
+            saved.append(result)
+            print(
+                f"[SECoursesBatchVideoSaveMerge] saved individual video -> {result['fullpath']}",
+                flush=True,
+            )
+
+        display_saved = saved
+        display_video = _video_from_saved_output(saved[-1])
+        merge_enabled = any(bool(value) for value in merge_batch_videos)
+        if merge_enabled and any(_sequential_batch_item(pack) is not None for pack in packs):
+            if len(saved) != 1:
+                raise ValueError("Sequential folder batching expects exactly one saved video per queued job.")
+            progress = _accumulate_sequential_output("video", saved[0]["fullpath"], packs[0])
+            if progress["complete"]:
+                merged_saved = []
+                for group in progress["groups"]:
+                    result = _merge_saved_video_group(group)
+                    merged_saved.append(result)
+                    print(
+                        f"[SECoursesBatchVideoSaveMerge] merged {len(group['videos'])} saved video(s) "
+                        f"for folder '{group['folder']}' -> {result['fullpath']}",
+                        flush=True,
+                    )
+                display_saved = [merged_saved[-1]]
+                display_video = _video_from_saved_output(merged_saved[-1])
+            else:
+                print(
+                    f"[SECoursesBatchVideoSaveMerge] saved sequential item "
+                    f"{progress['received']}/{progress['count']}; merge waits for the final item",
+                    flush=True,
+                )
+        elif merge_enabled:
+            groups = _batch_video_merge_groups(
+                [result["fullpath"] for result in saved], packs
+            )
+            if groups:
+                merged_saved = []
+                for group in groups:
+                    result = _merge_saved_video_group(group)
+                    merged_saved.append(result)
+                    print(
+                        f"[SECoursesBatchVideoSaveMerge] merged {len(group['videos'])} saved video(s) "
+                        f"for folder '{group['folder']}' -> {result['fullpath']}",
+                        flush=True,
+                    )
+                display_saved = [merged_saved[-1]]
+                display_video = _video_from_saved_output(merged_saved[-1])
+
+        return {
+            "ui": {
+                "images": [self._preview(item) for item in display_saved],
+                "animated": (True,),
+            },
+            "result": (display_video,),
+        }
 
 
 class SECoursesBatchVideoMerge:
@@ -1495,9 +1925,9 @@ class SECoursesBatchAudioSaveMerge:
     OUTPUT_NODE = True
     FUNCTION = "save_and_merge"
     DESCRIPTION = (
-        "Saves every generated MiniMax H3 audio clip as an individual lossless FLAC. When folder merging is "
-        "enabled, it additionally saves one merged FLAC per prompt directory and returns only the complete "
-        "last merged file to ComfyUI's audio player."
+        "Saves each MiniMax H3 folder prompt as an individual lossless FLAC before the next queued prompt "
+        "starts. After the final prompt, it saves one merged FLAC per prompt directory and returns only the "
+        "complete last merge to ComfyUI's audio player."
     )
 
     def save_and_merge(self, audio, references, merge_batch_audio, filename_prefix):
@@ -1518,7 +1948,34 @@ class SECoursesBatchAudioSaveMerge:
             )
 
         merged_saved = []
-        if any(bool(value) for value in merge_batch_audio):
+        display_audio = audio[-1]
+        merge_enabled = any(bool(value) for value in merge_batch_audio)
+        sequential = merge_enabled and any(
+            _sequential_batch_item(pack) is not None for pack in references
+        )
+        if sequential:
+            if len(individual_saved) != 1 or len(references) != 1:
+                raise ValueError("Sequential folder batching expects exactly one saved audio clip per queued job.")
+            progress = _accumulate_sequential_output(
+                "audio", individual_saved[0]["fullpath"], references[0]
+            )
+            if progress["complete"]:
+                for group in progress["groups"]:
+                    result = _merge_saved_audio_group(group)
+                    merged_saved.append(result)
+                    print(
+                        f"[SECoursesBatchAudioSaveMerge] merged {len(group['audios'])} saved audio clip(s) "
+                        f"for folder '{group['folder']}' -> {result['fullpath']}",
+                        flush=True,
+                    )
+                display_audio = _load_saved_audio_output(merged_saved[-1]["fullpath"])
+            else:
+                print(
+                    f"[SECoursesBatchAudioSaveMerge] saved sequential item "
+                    f"{progress['received']}/{progress['count']}; merge waits for the final item",
+                    flush=True,
+                )
+        elif merge_enabled:
             groups = _batch_audio_merge_groups(audio, references)
             if not groups:
                 print(
@@ -1537,10 +1994,10 @@ class SECoursesBatchAudioSaveMerge:
 
         if merged_saved:
             displayed = [merged_saved[-1]]
-            display_audio = _concatenate_batch_audio(groups[-1]["audios"])
+            if not sequential:
+                display_audio = _concatenate_batch_audio(groups[-1]["audios"])
         else:
             displayed = individual_saved
-            display_audio = audio[-1]
         preview = [
             {key: result[key] for key in ("filename", "subfolder", "type")}
             for result in displayed
@@ -1881,6 +2338,7 @@ class SECoursesTrimAudio:
 
 NODE_CLASS_MAPPINGS = {
     "SECoursesReferenceGallery": SECoursesReferenceGallery,
+    "SECoursesBatchVideoSaveMerge": SECoursesBatchVideoSaveMerge,
     "SECoursesBatchVideoMerge": SECoursesBatchVideoMerge,
     "SECoursesBatchAudioMerge": SECoursesBatchAudioMerge,
     "SECoursesBatchAudioSaveMerge": SECoursesBatchAudioSaveMerge,
@@ -1893,6 +2351,7 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesReferenceGallery": "SECourses Reference Gallery (Images / Videos / Audio)",
+    "SECoursesBatchVideoSaveMerge": "Save + Merge MiniMax H3 Folder Batch Videos",
     "SECoursesBatchVideoMerge": "Merge MiniMax H3 Folder Batch Videos",
     "SECoursesBatchAudioMerge": "Merge MiniMax H3 Folder Batch Audio",
     "SECoursesBatchAudioSaveMerge": "Save + Merge MiniMax H3 Folder Batch Audio",
@@ -1902,3 +2361,5 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesLoadVideoAudioB64": "Load Video Soundtrack (Base64, No Frames)",
     "SECoursesTrimAudio": "Trim Reference Audio",
 }
+
+_register_folder_batch_inspect_route()
