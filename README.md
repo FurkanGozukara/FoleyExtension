@@ -18,7 +18,13 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   reordering cards — a token without a matching attachment shows in red and is
   simply ignored at generation time. Files upload through ComfyUI's native
   `/upload/image` endpoint into `input/reference_gallery/`.
-  - Up to 9 images, 3 videos, 3 audio files.
+  - Up to 9 images, 3 videos, and 99 audio files. MiniMax H3 itself accepts at
+    most 3 standalone audio references per run, so with more than 3 audio files
+    attached the gallery becomes a voice roster: each run attaches only the
+    audios its prompt actually mentions (first-mention order, up to 3) and
+    discards the rest for that run. A folder-batch prompt saying `@audio5`
+    really receives the fifth attached audio file; if a prompt mentions more
+    than 3 different audios, the first 3 mentioned are used.
   - Videos are resampled to `video_fps` (24 for MiniMax H3), trimmed to
     `max_seconds`, and their soundtrack is paired automatically. The default
     is 15 seconds because clean 2-15 second references are quality-tested, but

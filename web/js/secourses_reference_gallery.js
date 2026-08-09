@@ -37,7 +37,10 @@ const REORDER_MIME = "application/x-secourses-reference";
 let sequentialQueueState = null;
 let sequentialQueueInstalled = false;
 
-/** Per-type '@' aliases, limits, and pill palettes, matching the SwarmUI extension. */
+/** Per-type '@' aliases, upload limits, and pill palettes. Image and video match
+ * the SwarmUI extension; audio uploads accept a roster larger than the model's
+ * 3-per-run cap, and the backend attaches only the (up to 3) audios each
+ * prompt mentions, so folder-batch prompts can address eg '@audio5'. */
 const REFERENCE_TYPES = {
     image: {
         aliases: ["image", "img", "picture", "pic"],
@@ -56,7 +59,7 @@ const REFERENCE_TYPES = {
     audio: {
         aliases: ["audio", "aud", "sound"],
         label: "Audio",
-        max: 3,
+        max: 99,
         colors: ["#fcc419", "#da77f2", "#66d9e8"],
         stateKey: "audios",
     },
