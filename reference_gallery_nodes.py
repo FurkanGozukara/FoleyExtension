@@ -87,7 +87,7 @@ _CANONICAL_TYPE = {
 
 
 def translate_reference_tokens(prompt, image_count, video_count, audio_count, audio_label_offset,
-                               audio_number_map=None):
+                               audio_number_map=None, image_number_map=None, video_number_map=None):
     """Rewrites '@image1' style tokens into the '<Picture 1>' labels MiniMax H3 expects.
 
     Audio labels index video soundtracks first, so standalone audio tokens are
@@ -97,10 +97,11 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
     images attached) are silently omitted, together with one adjacent space, so
     a stale token left in the prompt never blocks execution.
 
-    ``audio_number_map`` renumbers audio tokens when the gallery holds more
-    audios than the model cap and only the prompt-mentioned subset is attached:
-    '@audio5' with ``{5: 1}`` becomes the first standalone audio label, and
-    audio tokens missing from the map are omitted like stale tokens.
+    The ``*_number_map`` arguments renumber tokens when the gallery holds more
+    files of that modality than the model cap and only the prompt-mentioned
+    subset is attached: '@audio5' with an audio map of ``{5: 1}`` becomes the
+    first standalone audio label, and tokens missing from their map are omitted
+    like stale tokens.
     """
     if not prompt or "@" not in prompt:
         return prompt
@@ -113,13 +114,13 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
         last = match.end()
         kind = _CANONICAL_TYPE[match.group("type").lower()]
         number = int(match.group("num"))
-        label, count, offset = {
-            "image": ("Picture", image_count, 0),
-            "video": ("Video", video_count, 0),
-            "audio": ("Audio", audio_count, audio_label_offset),
+        label, count, offset, number_map = {
+            "image": ("Picture", image_count, 0, image_number_map),
+            "video": ("Video", video_count, 0, video_number_map),
+            "audio": ("Audio", audio_count, audio_label_offset, audio_number_map),
         }[kind]
-        if kind == "audio" and audio_number_map is not None:
-            number = audio_number_map.get(number, 0)
+        if number_map is not None:
+            number = number_map.get(number, 0)
         if 1 <= number <= count:
             pieces.append(f"<{label} {offset + number}>")
             continue
@@ -139,12 +140,14 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
 
 
 def translate_audio_only_reference_tokens(prompt, image_count, video_count, audio_count,
-                                          audio_number_map=None):
+                                          audio_number_map=None, image_number_map=None,
+                                          video_number_map=None):
     """Translate video aliases to their extracted soundtracks for audio-only H3 runs.
 
-    ``audio_number_map`` behaves exactly as in ``translate_reference_tokens``:
-    it renumbers standalone audio tokens onto the attached prompt-mentioned
-    subset when the gallery holds more audios than the model cap.
+    The ``*_number_map`` arguments behave exactly as in
+    ``translate_reference_tokens``: they renumber tokens onto the attached
+    prompt-mentioned subset when the gallery holds more files of a modality
+    than the model cap.
     """
     if not prompt or "@" not in prompt:
         return prompt
@@ -157,13 +160,13 @@ def translate_audio_only_reference_tokens(prompt, image_count, video_count, audi
         last = match.end()
         kind = _CANONICAL_TYPE[match.group("type").lower()]
         number = int(match.group("num"))
-        label, count, offset = {
-            "image": ("Picture", image_count, 0),
-            "video": ("Audio", video_count, 0),
-            "audio": ("Audio", audio_count, video_count),
+        label, count, offset, number_map = {
+            "image": ("Picture", image_count, 0, image_number_map),
+            "video": ("Audio", video_count, 0, video_number_map),
+            "audio": ("Audio", audio_count, video_count, audio_number_map),
         }[kind]
-        if kind == "audio" and audio_number_map is not None:
-            number = audio_number_map.get(number, 0)
+        if number_map is not None:
+            number = number_map.get(number, 0)
         if 1 <= number <= count:
             pieces.append(f"<{label} {offset + number}>")
             continue
@@ -182,57 +185,65 @@ def translate_audio_only_reference_tokens(prompt, image_count, video_count, audi
     return "".join(pieces)
 
 
-def select_prompt_audio_references(prompt, audios, max_audios):
-    """Choose which standalone audio attachments accompany one prompt.
+def select_prompt_media_references(prompt, entries, max_count, kind):
+    """Choose which attachments of one modality accompany one prompt.
 
-    Galleries within the MiniMax H3 cap pass straight through, preserving the
-    historical attach-everything behavior. A larger gallery acts as a roster:
-    only the audios the prompt actually mentions are attached, in first-mention
-    order, capped at ``max_audios``, so folder-batch prompts can address eg
-    ``@audio5`` from a ten-voice roster. Returns the attached subset plus a
-    renumbering map ({original_number: attached_position}) for the prompt
-    translators; unmentioned attachments are discarded for this run only.
+    ``kind`` is the canonical token type: ``"image"``, ``"video"``, or
+    ``"audio"``. Galleries within the MiniMax H3 cap (9 images, 3 videos,
+    3 standalone audios) pass straight through, preserving the historical
+    attach-everything behavior. A larger gallery acts as a roster: only the
+    files the prompt actually mentions are attached, in first-mention order,
+    capped at ``max_count``, so folder-batch prompts can address eg
+    ``@audio5`` or ``@image12`` from a large roster. Returns the attached
+    subset plus a renumbering map ({original_number: attached_position}) for
+    the prompt translators; unmentioned attachments are discarded for this run
+    only.
     """
-    if len(audios) <= max_audios:
-        return audios, None
+    if len(entries) <= max_count:
+        return entries, None
 
     mentioned = []
     for match in TOKEN_MATCHER.finditer(prompt or ""):
-        if _CANONICAL_TYPE[match.group("type").lower()] != "audio":
+        if _CANONICAL_TYPE[match.group("type").lower()] != kind:
             continue
         number = int(match.group("num"))
-        if 1 <= number <= len(audios) and number not in mentioned:
+        if 1 <= number <= len(entries) and number not in mentioned:
             mentioned.append(number)
-    selected = mentioned[:max_audios]
+    selected = mentioned[:max_count]
 
     def _describe(numbers):
         return ", ".join(
-            f"@audio{number} ({audios[number - 1].get('name') or '?'})" for number in numbers
+            f"@{kind}{number} ({entries[number - 1].get('name') or '?'})" for number in numbers
         )
 
-    if len(mentioned) > max_audios:
+    if len(mentioned) > max_count:
         print(
-            f"[SECoursesMiniMaxH3References] the prompt mentions {len(mentioned)} audio references but "
-            f"MiniMax H3 accepts {max_audios}; keeping the first mentioned: {_describe(selected)}; "
-            f"dropping: {_describe(mentioned[max_audios:])}",
+            f"[SECoursesMiniMaxH3References] the prompt mentions {len(mentioned)} {kind} references but "
+            f"MiniMax H3 accepts {max_count}; keeping the first mentioned: {_describe(selected)}; "
+            f"dropping: {_describe(mentioned[max_count:])}",
             flush=True,
         )
     elif selected:
         print(
-            f"[SECoursesMiniMaxH3References] gallery holds {len(audios)} audio files; attaching the "
+            f"[SECoursesMiniMaxH3References] gallery holds {len(entries)} {kind} files; attaching the "
             f"{len(selected)} mentioned in the prompt: {_describe(selected)}",
             flush=True,
         )
     else:
         print(
-            f"[SECoursesMiniMaxH3References] gallery holds {len(audios)} audio files but the prompt "
-            "mentions none of them; no standalone audio reference is attached for this run",
+            f"[SECoursesMiniMaxH3References] gallery holds {len(entries)} {kind} files but the prompt "
+            f"mentions none of them; no {kind} reference is attached for this run",
             flush=True,
         )
     return (
-        [audios[number - 1] for number in selected],
+        [entries[number - 1] for number in selected],
         {number: index + 1 for index, number in enumerate(selected)},
     )
+
+
+def select_prompt_audio_references(prompt, audios, max_audios):
+    """Backward-compatible wrapper for the audio modality."""
+    return select_prompt_media_references(prompt, audios, max_audios, "audio")
 
 
 def _parse_manifest(references):
@@ -2125,9 +2136,10 @@ class SECoursesMiniMaxH3References:
         "Feeds a SECourses Reference Gallery pack to ComfyUI's native MiniMax H3 Ref2VA conditioning. '@image1' / "
         "'@video1' / '@audio1' prompt tokens are translated to the '<Picture 1>' / '<Video 1>' / '<Audio 1>' labels "
         "the model expects, with audio labels offset past video soundtracks automatically. High-resolution media "
-        "is decoded lazily into an aspect-preserving, memory-bounded canvas. The gallery may hold more audio files "
-        "than the model's per-run cap of 3: each run then attaches only the audios its prompt mentions (first-"
-        "mention order, up to 3), so folder-batch prompts can address eg '@audio5' from a larger voice roster."
+        "is decoded lazily into an aspect-preserving, memory-bounded canvas. The gallery may hold more files than "
+        "the model's per-run caps (9 images, 3 videos, 3 audios): each run then attaches only the files of that "
+        "modality its prompt mentions (first-mention order, capped at the model limit), so folder-batch prompts "
+        "can address eg '@image12', '@video4', or '@audio5' from a larger roster."
     )
 
     def encode(self, clip, vae, audio_vae, references, width, height, length, ref_image_size,
@@ -2144,18 +2156,17 @@ class SECoursesMiniMaxH3References:
         images = references.get("images") or []
         videos = references.get("videos") or []
         audios = references.get("audios") or []
-        if len(images) > self.MAX_IMAGES:
-            raise ValueError(f"MiniMax H3 supports at most {self.MAX_IMAGES} image references; the gallery has {len(images)}.")
-        if len(videos) > self.MAX_VIDEOS:
-            raise ValueError(f"MiniMax H3 supports at most {self.MAX_VIDEOS} video references; the gallery has {len(videos)}.")
 
         prompt = references.get("prompt") or ""
         if prompt_override is not None and str(prompt_override).strip():
             prompt = str(prompt_override)
 
-        # A gallery larger than the model's audio cap acts as a roster: the
-        # prompt decides which audios are attached (first-mention order).
-        audios, audio_number_map = select_prompt_audio_references(prompt, audios, self.MAX_AUDIOS)
+        # A gallery larger than a model cap acts as a roster: the prompt
+        # decides which attachments accompany this run (first-mention order,
+        # capped at the model limit for each modality).
+        images, image_number_map = select_prompt_media_references(prompt, images, self.MAX_IMAGES, "image")
+        videos, video_number_map = select_prompt_media_references(prompt, videos, self.MAX_VIDEOS, "video")
+        audios, audio_number_map = select_prompt_media_references(prompt, audios, self.MAX_AUDIOS, "audio")
 
         if int(references.get("version", 1)) >= 2:
             fps = max(1.0, float(references.get("video_fps", 24.0)))
@@ -2232,12 +2243,14 @@ class SECoursesMiniMaxH3References:
         if audio_only_mode:
             translated = translate_audio_only_reference_tokens(
                 prompt, len(images), videos_with_audio, len(audios),
-                audio_number_map=audio_number_map,
+                audio_number_map=audio_number_map, image_number_map=image_number_map,
+                video_number_map=video_number_map,
             )
         else:
             translated = translate_reference_tokens(
                 prompt, len(images), len(videos), len(audios), videos_with_audio,
-                audio_number_map=audio_number_map,
+                audio_number_map=audio_number_map, image_number_map=image_number_map,
+                video_number_map=video_number_map,
             )
 
         if translated != prompt:
