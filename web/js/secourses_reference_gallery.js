@@ -25,6 +25,7 @@ import {
     injectSequentialBatchItem,
     supportsSequentialFolderQueue,
 } from "./secourses_folder_batch_queue.mjs";
+import { reconcilePortableComboPaths } from "./secourses_portable_combo_paths.mjs";
 import { resolveConfiguredPrompt } from "./secourses_reference_gallery_state.mjs";
 
 const NODE_CLASS = "SECoursesReferenceGallery";
@@ -1445,6 +1446,9 @@ app.registerExtension({
     },
     setup() {
         installSequentialFolderQueue();
+    },
+    loadedGraphNode(node) {
+        reconcilePortableComboPaths(node);
     },
     beforeRegisterNodeDef(nodeType, nodeData) {
         if (nodeData.name === AUDIO_RESULT_CLASS) {
