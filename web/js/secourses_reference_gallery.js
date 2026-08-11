@@ -257,6 +257,7 @@ class ReferenceGalleryUI {
         this.manifestWidget = node.widgets?.find((w) => w.name === "references");
         this.batchFolderWidget = node.widgets?.find((w) => w.name === "batch_folder");
         this.mergeBatchWidget = node.widgets?.find((w) => w.name === "merge_batch_videos");
+        this.continueLastFrameWidget = node.widgets?.find((w) => w.name === "continue_batch_with_last_frame");
         this.state = { images: [], videos: [], audios: [] };
         this.suggestIndex = 0;
         this.suggestMatches = null;
@@ -268,6 +269,7 @@ class ReferenceGalleryUI {
         hideWidget(this.manifestWidget);
         hideWidget(this.batchFolderWidget);
         hideWidget(this.mergeBatchWidget);
+        hideWidget(this.continueLastFrameWidget);
         const ui = this;
         this.widget = node.addDOMWidget("gallery_ui", "secourses_gallery", this.root, {
             hideOnZoom: false,
@@ -368,6 +370,24 @@ class ReferenceGalleryUI {
         this.mergeToggle.append(this.mergeCheckbox, mergeTrack, this.mergeLabel);
         this.batchRow.append(batchField, this.mergeToggle);
 
+        this.continuationRow = document.createElement("div");
+        this.continuationRow.className = "secourses-refgal-continuationrow";
+        this.lastFrameToggle = document.createElement("label");
+        this.lastFrameToggle.className = "secourses-refgal-mergetoggle secourses-refgal-continuationtoggle";
+        this.lastFrameToggle.title = "After each folder prompt finishes and saves, use only that video's final frame as the next prompt's starting image. Prompts with other references stay on Ref2VA; prompts without references use FL2VA.";
+        this.lastFrameCheckbox = document.createElement("input");
+        this.lastFrameCheckbox.type = "checkbox";
+        this.lastFrameCheckbox.setAttribute("role", "switch");
+        this.lastFrameCheckbox.setAttribute("aria-label", "Continue from last frame");
+        const lastFrameTrack = document.createElement("span");
+        lastFrameTrack.className = "secourses-refgal-mergetrack";
+        lastFrameTrack.setAttribute("aria-hidden", "true");
+        const lastFrameLabel = document.createElement("span");
+        lastFrameLabel.className = "secourses-refgal-mergelabel";
+        lastFrameLabel.textContent = "Continue from last frame";
+        this.lastFrameToggle.append(this.lastFrameCheckbox, lastFrameTrack, lastFrameLabel);
+        this.continuationRow.append(this.lastFrameToggle);
+
         this.fileInput = document.createElement("input");
         this.fileInput.type = "file";
         this.fileInput.multiple = true;
@@ -381,6 +401,7 @@ class ReferenceGalleryUI {
             this.loader,
             this.promptWrap,
             this.batchRow,
+            this.continuationRow,
             this.fileInput,
             this.loaderFileInput,
         );
@@ -580,6 +601,19 @@ class ReferenceGalleryUI {
             this.mergeCheckbox.checked = !this.mergeCheckbox.checked;
             this.mergeCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
         });
+        this.lastFrameCheckbox.addEventListener("change", () => {
+            if (this.continueLastFrameWidget) {
+                this.continueLastFrameWidget.value = this.lastFrameCheckbox.checked;
+                this.continueLastFrameWidget.callback?.(this.continueLastFrameWidget.value);
+            }
+            this.node.setDirtyCanvas(true, true);
+        });
+        this.lastFrameToggle.addEventListener("click", (event) => {
+            if (event.target === this.lastFrameCheckbox) return;
+            event.preventDefault();
+            this.lastFrameCheckbox.checked = !this.lastFrameCheckbox.checked;
+            this.lastFrameCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+        });
         this.fileInput.addEventListener("change", async () => {
             await this.addFiles([...this.fileInput.files]);
             this.fileInput.value = "";
@@ -670,7 +704,10 @@ class ReferenceGalleryUI {
         this.batchFolderInput.value = String(this.batchFolderWidget?.value ?? "");
         const mergeValue = this.mergeBatchWidget?.value;
         this.mergeCheckbox.checked = mergeValue === true || mergeValue === "true" || mergeValue === 1;
+        const continuationValue = this.continueLastFrameWidget?.value;
+        this.lastFrameCheckbox.checked = continuationValue === true || continuationValue === "true" || continuationValue === 1;
         this.updateMergeAvailability();
+        this.updateContinuationAvailability();
         if (hydratePrompt) {
             this.textarea.value = this.promptWidget?.value ?? "";
         }
@@ -707,6 +744,13 @@ class ReferenceGalleryUI {
         }
         this.mergeToggle.hidden = !available;
         this.mergeCheckbox.disabled = !available;
+    }
+
+    updateContinuationAvailability() {
+        const output = this.node.outputs?.find((item) => item.name === "continue_batch_with_last_frame");
+        const available = Boolean(output?.links?.length);
+        this.continuationRow.hidden = !available;
+        this.lastFrameCheckbox.disabled = !available;
     }
 
     configureFromWidgets() {
@@ -1195,7 +1239,8 @@ class ReferenceGalleryUI {
         const perRow = Math.max(1, Math.floor((width - 12) / 128));
         const rows = total ? Math.ceil(total / perRow) : 0;
         const cardsH = total ? Math.min(rows, 2) * 124 : 30;
-        return 34 + cardsH + this.trimLoaderHeight() + 116 + 66 + 14;
+        const continuationH = this.continuationRow.hidden ? 0 : 40;
+        return 34 + cardsH + this.trimLoaderHeight() + 116 + 66 + continuationH + 14;
     }
 
     computeHeight(width) {
@@ -1480,6 +1525,7 @@ app.registerExtension({
         });
         chainCallback(nodeType.prototype, "onConnectionsChange", function () {
             this.__refGallery?.updateMergeAvailability();
+            this.__refGallery?.updateContinuationAvailability();
         });
     },
 });

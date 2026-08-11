@@ -519,6 +519,19 @@ audio.secourses-refgal-media {
     min-width: 0;
 }
 
+.secourses-refgal-continuationrow {
+    display: flex;
+    flex: 0 0 auto;
+    flex-wrap: wrap;
+    gap: 8px;
+    justify-content: flex-end;
+    min-width: 0;
+}
+
+.secourses-refgal-continuationrow[hidden] {
+    display: none !important;
+}
+
 .secourses-refgal-batchfield {
     display: flex;
     flex: 1 1 auto;
@@ -574,6 +587,10 @@ audio.secourses-refgal-media {
     padding: 0 9px;
     position: relative;
     user-select: none;
+}
+
+.secourses-refgal-continuationtoggle {
+    height: 34px;
 }
 
 .secourses-refgal-mergetoggle[hidden] {

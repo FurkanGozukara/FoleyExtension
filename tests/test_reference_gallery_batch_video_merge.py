@@ -103,6 +103,7 @@ class BatchVideoMergeTests(unittest.TestCase):
 
         self.assertEqual(result[2], [True, True])
         self.assertEqual(result[3], [True, True])
+        self.assertEqual(result[4], [False, False])
 
     def test_gallery_selects_one_sequential_prompt_per_queued_job(self):
         packs = (
@@ -120,6 +121,7 @@ class BatchVideoMergeTests(unittest.TestCase):
                 15,
                 "C:/batch",
                 True,
+                False,
                 "run_12345678",
                 1,
                 2,

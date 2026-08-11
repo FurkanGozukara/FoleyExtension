@@ -44,7 +44,10 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     frontend queues each prompt as a separate job in natural order. Each job is
     fully generated, decoded, and saved before the next job starts. The adjacent
     merge toggle retains those per-prompt files and, after the final job, also
-    concatenates each prompt directory. Video presets produce MP4 files in
+    concatenates each prompt directory. A prompt named like `scene_8.txt` uses
+    8 seconds for that item; the final underscore-separated part must be a
+    positive integer. Names such as `8.txt`, `scene.txt`, and `scene_0.txt` use
+    the workflow's duration control. Video presets produce MP4 files in
     `output/video`; the audio-only preset produces lossless FLAC files in
     `output/audio`. A batch with no subfolders produces one root merge, while
     multiple prompt directories produce one merge per directory. Only the
@@ -53,6 +56,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     filenames use Windows-style natural ordering (`1`, `2`, `10`) on Windows
     and Linux alike; that order assigns `@image1`, `@image2`, and the other
     numbered reference slots.
+  - **Continue from last frame** is available beside the video merge control
+    and is off by default. The first item starts normally. After every later
+    prompt, only the preceding saved video's final frame is decoded and used as
+    the next starting image. Items with media references remain Ref2VA; items
+    without references use FL2VA. Ref2VA continuation reserves one of its nine
+    picture slots, so the prompt may use at most eight additional images.
   - Video soundtracks take the first native audio slots. With `@video1` and
     standalone `@audio1` attached, use `<Audio 1>` for `@video1`'s soundtrack;
     `@audio1` remains the standalone file and is translated to `<Audio 2>`.
@@ -84,6 +93,15 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   let one workflow choose the task-specific checkpoint lazily: FL2VA when the
   current prompt has no media and Ref2VA when it does. This also works per item
   in recursive folder batches.
+- **MiniMax H3 Auto (Gallery)** combines those paths for video presets. Its
+  mode output is diagnostic; **MiniMax H3 Reference Mode** selects the
+  checkpoint before model-dependent VAE optimization. Auto applies a
+  continuation frame as an FL2VA first-frame keyframe when no other references
+  exist, or as an explicit Ref2VA picture reference when they do.
+- **MiniMax H3 Batch Duration** resolves the per-item filename suffix while
+  preserving the user-set duration for normal prompts and unmatched names.
+- **MiniMax H3 Previous Batch Final Frame** validates strict sequential order
+  and loads the saved frame used by the optional continuation path.
 
 - **Save + Merge MiniMax H3 Folder Batch Videos** is the video presets' single
   result node. It saves the current individual MP4 before the next queued prompt
