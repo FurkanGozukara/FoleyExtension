@@ -111,6 +111,19 @@ function mediaKind(file) {
     return null;
 }
 
+function referenceStorageName(filename) {
+    const words = new Uint32Array(4);
+    if (globalThis.crypto?.getRandomValues) {
+        globalThis.crypto.getRandomValues(words);
+    } else {
+        words[0] = Date.now();
+        words[1] = Math.random() * 0xffffffff;
+    }
+    const id = Array.from(words, (word) => word.toString(16).padStart(8, "0")).join("");
+    const extension = /\.([a-zA-Z0-9]{1,10})$/.exec(String(filename))?.[1]?.toLowerCase();
+    return `reference-${id}${extension ? `.${extension}` : ""}`;
+}
+
 function notify(severity, summary, detail) {
     const toast = app.extensionManager?.toast;
     if (toast?.add) {
@@ -217,7 +230,7 @@ function viewURL(annotated) {
 
 async function uploadReferenceFile(file) {
     const body = new FormData();
-    body.append("image", file, file.name);
+    body.append("image", file, referenceStorageName(file.name));
     body.append("type", "input");
     body.append("subfolder", UPLOAD_SUBFOLDER);
     const response = await api.fetchApi("/upload/image", { method: "POST", body });
