@@ -1,6 +1,8 @@
 import sys
+import tempfile
 import unittest
 from pathlib import Path
+from types import SimpleNamespace
 from unittest import mock
 
 import torch
@@ -106,6 +108,17 @@ class InitAudioLoaderTests(unittest.TestCase):
             self.assertEqual(seconds, 5.0)
             self.assertEqual(node.IS_CHANGED("voice.wav"), "hash:voice.wav")
 
+    def test_picker_lists_extended_audio_and_video_containers(self):
+        with tempfile.TemporaryDirectory() as directory:
+            for name in ("voice.ape", "music.m4b", "clip.wmv", "notes.txt"):
+                Path(directory, name).touch()
+            import folder_paths
+
+            with mock.patch.object(folder_paths, "get_input_directory", return_value=directory):
+                choices = init_audio.SECoursesInitAudio.INPUT_TYPES()["required"]["audio"][0]
+
+        self.assertEqual(choices, [init_audio.NO_AUDIO, "clip.wmv", "music.m4b", "voice.ape"])
+
 
 class FramesTests(unittest.TestCase):
     def test_frames_follow_audio_unless_disabled(self):
@@ -171,6 +184,47 @@ class ConditioningTests(unittest.TestCase):
         # muxed audio: 32 kHz stereo cut to the 124-frame video (5.1667 s)
         self.assertEqual(fitted["sample_rate"], 32000)
         self.assertEqual(tuple(fitted["waveform"].shape), (1, 2, round(124 / 24 * 32000)))
+
+    def test_folder_batch_audio_overrides_single_init_audio(self):
+        node = init_audio.SECoursesMiniMaxH3InitAudio()
+        positive = [[torch.zeros((1, 4, 8)), {}]]
+        latent, _ = self.latent(frames=22)
+        batch_audio = audio(0.5, value=0.75)
+        references = {"init_audio": {"name": "scene.ape", "path": "scene.ape"}}
+        with (
+            mock.patch("reference_gallery_nodes._resolve_reference_entry", return_value="scene.ape"),
+            mock.patch("reference_gallery_nodes._load_reference_audio", return_value=batch_audio) as load,
+        ):
+            _cond, _latent, fitted = node.apply(
+                positive, latent, FakeAudioVAE(), audio(0.5, value=0.1), references=references
+            )
+
+        load.assert_called_once()
+        self.assertTrue(torch.allclose(fitted["waveform"][..., :100], torch.full_like(fitted["waveform"][..., :100], 0.75)))
+
+    def test_locked_audio_mask_reaches_core_h3_timestep_conditioning(self):
+        import comfy.model_base
+        import comfy.utils
+
+        positive = [[torch.zeros((1, 4, 8)), {}]]
+        latent, _ = self.latent()
+        _, out, _ = init_audio.SECoursesMiniMaxH3InitAudio().apply(
+            positive, latent, FakeAudioVAE(), audio(3.0)
+        )
+        video_mask, audio_mask = out["noise_mask"].unbind()
+        packed_mask, shapes = comfy.utils.pack_latents([video_mask, audio_mask])
+
+        class MaskProbe:
+            diffusion_model = SimpleNamespace(patch_size=(1, 2, 2))
+            _pool_masks_to_token_grid = comfy.model_base.MiniMaxH3._pool_masks_to_token_grid
+            _token_grid_masks = comfy.model_base.MiniMaxH3._token_grid_masks
+            _denoise_mask_values = comfy.model_base.MiniMaxH3._denoise_mask_values
+
+        values = MaskProbe()._denoise_mask_values(packed_mask, shapes)
+        self.assertNotIn("denoise_mask", values)
+        self.assertIn("audio_denoise_mask", values)
+        self.assertEqual(tuple(values["audio_denoise_mask"].shape), (1, 1, 2, audio_mask.shape[-1]))
+        self.assertTrue(torch.all(values["audio_denoise_mask"] == 0))
 
     def test_lock_only_and_guide_only(self):
         node = init_audio.SECoursesMiniMaxH3InitAudio()

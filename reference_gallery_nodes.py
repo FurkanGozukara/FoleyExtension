@@ -42,6 +42,11 @@ import time
 import warnings
 from pathlib import Path
 
+try:
+    from .media_extensions import audio_extensions, image_extensions
+except ImportError:  # direct test-module import
+    from media_extensions import audio_extensions, image_extensions
+
 
 REF_PACK_TYPE = "SECOURSES_REF_PACK"
 OPTIONAL_IMAGE_TYPE = "SECOURSES_OPTIONAL_IMAGE"
@@ -63,9 +68,9 @@ VIDEO_DECODE_AREA_CAP = 768 * 1344
 HASH_CHUNK_SIZE = 1024 * 1024
 
 BATCH_PROMPT_EXTENSIONS = {".txt"}
-BATCH_IMAGE_EXTENSIONS = {".png", ".jpg", ".jpeg", ".webp", ".gif", ".bmp", ".tif", ".tiff", ".avif"}
+BATCH_IMAGE_EXTENSIONS = image_extensions()
 BATCH_VIDEO_EXTENSIONS = {".mp4", ".webm", ".mov", ".m4v", ".mkv", ".avi"}
-BATCH_AUDIO_EXTENSIONS = {".wav", ".mp3", ".aac", ".ogg", ".flac", ".m4a", ".opus"}
+BATCH_AUDIO_EXTENSIONS = audio_extensions()
 BATCH_MEDIA_EXTENSIONS = BATCH_IMAGE_EXTENSIONS | BATCH_VIDEO_EXTENSIONS | BATCH_AUDIO_EXTENSIONS
 BATCH_MAX_PROMPTS = 1000
 BATCH_MAX_PROMPT_BYTES = 1024 * 1024
@@ -480,7 +485,7 @@ def _batch_prompt_duration_seconds(path):
     return duration if duration > 0 else None
 
 
-def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_seconds):
+def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_seconds, match_init_media=False):
     root = _normalize_batch_folder(batch_folder)
     if root is None:
         return None
@@ -489,6 +494,14 @@ def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_second
     folder_counts = {}
     for prompt_path in prompt_files:
         folder_counts[prompt_path.parent] = folder_counts.get(prompt_path.parent, 0) + 1
+    prompt_stems = {
+        folder: {
+            prompt_path.stem.casefold()
+            for prompt_path in prompt_files
+            if prompt_path.parent == folder
+        }
+        for folder in folder_counts
+    }
 
     folder_media = {}
     folder_indexes = {}
@@ -501,20 +514,39 @@ def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_second
             folder_media[folder] = _batch_media_entries(root, folder)
         media = folder_media[folder]
         media_count = sum(len(media[key]) for key in ("images", "videos", "audios"))
-        chosen = media if media_count else fallback_manifest
+        chosen = {key: list(values) for key, values in media.items()} if media_count else fallback_manifest
+        init_image = None
+        init_audio = None
+        if match_init_media and media_count:
+            stem = prompt_path.stem.casefold()
+            init_images = [entry for entry in media["images"] if Path(entry["name"]).stem.casefold() == stem]
+            init_audios = [entry for entry in media["audios"] if Path(entry["name"]).stem.casefold() == stem]
+            if len(init_images) > 1 or len(init_audios) > 1:
+                duplicates = init_images if len(init_images) > 1 else init_audios
+                raise ValueError(
+                    f"Folder prompt '{prompt_path.name}' has multiple same-basename init files: "
+                    + ", ".join(entry["name"] for entry in duplicates)
+                )
+            init_image = init_images[0] if init_images else None
+            init_audio = init_audios[0] if init_audios else None
+            reserved = prompt_stems[folder]
+            chosen["images"] = [entry for entry in media["images"] if Path(entry["name"]).stem.casefold() not in reserved]
+            chosen["audios"] = [entry for entry in media["audios"] if Path(entry["name"]).stem.casefold() not in reserved]
         prompt = _read_batch_prompt(prompt_path)
         relative_folder = folder.relative_to(root).as_posix()
         if relative_folder == ".":
             relative_folder = "root"
         filename_duration = _batch_prompt_duration_seconds(prompt_path)
         packs.append({
-            "version": 3,
+            "version": 4,
             "prompt": prompt,
             "video_fps": float(video_fps),
             "max_seconds": float(max_seconds),
             "images": [dict(entry) for entry in chosen["images"]],
             "videos": [dict(entry) for entry in chosen["videos"]],
             "audios": [dict(entry) for entry in chosen["audios"]],
+            "init_image": dict(init_image) if init_image else None,
+            "init_audio": dict(init_audio) if init_audio else None,
             "batch": {
                 "root": str(root),
                 "folder": relative_folder,
@@ -1170,6 +1202,19 @@ def _oriented_image_dimensions(path):
                 orientation = img.getexif().get(274, 1)
     except Image.DecompressionBombError as error:
         raise ValueError(f"Reference image '{path}' is too large to decode safely: {error}") from error
+    except OSError:
+        import av
+
+        try:
+            with av.open(str(path), mode="r") as container:
+                if not container.streams.video:
+                    raise ValueError(f"No image stream found in reference image '{path}'.")
+                stream = container.streams.video[0]
+                width = int(stream.codec_context.width or 0)
+                height = int(stream.codec_context.height or 0)
+                orientation = 1
+        except (av.error.FFmpegError, OSError) as error:
+            raise ValueError(f"Could not inspect reference image '{path}': {error}") from error
     pixels = width * height
     if pixels > IMAGE_MAX_SOURCE_PIXELS:
         raise ValueError(
@@ -1214,7 +1259,20 @@ def _load_reference_image(path, target_width=None, target_height=None):
     target_height = min(height, int(target_height or height))
     with warnings.catch_warnings():
         warnings.simplefilter("ignore", Image.DecompressionBombWarning)
-        with Image.open(path) as img:
+        try:
+            img = Image.open(path)
+        except OSError:
+            import av
+
+            try:
+                with av.open(str(path), mode="r") as container:
+                    frame = next(container.decode(video=0), None)
+                    if frame is None:
+                        raise ValueError(f"No decodable image frame found in reference image '{path}'.")
+                    img = frame.to_image()
+            except (av.error.FFmpegError, OSError) as error:
+                raise ValueError(f"Could not decode reference image '{path}': {error}") from error
+        with img:
             stored_target = (target_height, target_width) if orientation in (5, 6, 7, 8) else (target_width, target_height)
             img.draft("RGB", stored_target)
             img = ImageOps.exif_transpose(img)
@@ -1408,6 +1466,23 @@ def _load_reference_audio(path, max_seconds, trim_start=0.0):
             )
         raise ValueError(f"No usable audio stream found in reference audio '{path}'.")
     return audio
+
+
+def _audio_duration_seconds(path):
+    """Read an audio stream duration, decoding only when the container omits it."""
+    import av
+
+    with av.open(str(path), mode="r") as container:
+        if not container.streams.audio:
+            raise ValueError(f"No usable audio stream found in folder-batch init audio '{path}'.")
+        stream = container.streams.audio[0]
+        if stream.duration is not None and stream.time_base is not None:
+            return float(stream.duration * stream.time_base)
+        if container.duration is not None:
+            return float(container.duration / av.time_base)
+        samples = sum(frame.samples for frame in container.decode(streams=stream.index))
+        sample_rate = int(stream.codec_context.sample_rate or 0)
+    return samples / sample_rate if sample_rate > 0 else 0.0
 
 
 def _entry_trim_window(entry, max_seconds):
@@ -1650,7 +1725,7 @@ class SECoursesReferenceGallery:
                 }),
                 "batch_folder": ("STRING", {
                     "default": "",
-                    "tooltip": "Optional local folder containing UTF-8 .txt prompts. Prompts and reference media use Windows-style natural filename order on every OS (1, 2, 10), so that order determines @image1, @image2, and the other numbered slots. Media beside each prompt is used as that prompt's references; when that folder has no media, the gallery attachments are used as fallback references. Subfolders are scanned recursively but never share media with each other.",
+                    "tooltip": "Optional local folder containing UTF-8 .txt prompts. With init matching enabled, prompt.txt + prompt.<image> is image-to-video, prompt.txt + prompt.<audio> is audio-to-video, and all three combine. Other media beside the prompts are references in natural order. Gallery attachments are the fallback when a directory has no media. Subfolders never share media.",
                 }),
                 "merge_batch_videos": ("BOOLEAN", {
                     "default": False,
@@ -1659,6 +1734,12 @@ class SECoursesReferenceGallery:
                 "continue_batch_with_last_frame": ("BOOLEAN", {
                     "default": False,
                     "tooltip": "When Folder batch is active, use the last frame of each completed video as the next prompt's starting image. The first prompt uses no continuation frame.",
+                }),
+                "match_batch_init_media": ("BOOLEAN", {
+                    "default": False,
+                    "label_on": "SAME-NAME INIT MEDIA: ON",
+                    "label_off": "SAME-NAME INIT MEDIA: OFF",
+                    "tooltip": "When enabled, prompt.txt + prompt.<image> uses the image as the first frame, prompt.txt + prompt.<audio> uses the audio as the locked soundtrack, and all three combine. Other media remain references. Disabled by default for compatibility; MiniMax H3 video presets enable it.",
                 }),
             },
             "optional": {
@@ -1690,8 +1771,9 @@ class SECoursesReferenceGallery:
         "only that window is decoded at generation time. Feed the references output into a model adapter node "
         "(eg 'MiniMax H3 References (Gallery)'). Media stays lazy until the adapter can apply its canvas, "
         "duration, and memory limits. An optional folder path queues one complete job per recursively discovered "
-        ".txt prompt, saving each output before the next job starts. Media comes only from the prompt's own "
-        "directory, with gallery attachments as fallback. Optional toggles merge each directory after the final "
+        ".txt prompt, saving each output before the next job starts. Compatible video presets can match a prompt's "
+        "basename to an init image, init audio, or both; other media remains reference material. Media comes only "
+        "from the prompt's own directory, with gallery attachments as fallback. Optional toggles merge after the final "
         "job or feed each completed video's final frame into the next prompt. A prompt filename ending in "
         "'_<integer>.txt' overrides that item's output duration in compatible presets."
     )
@@ -1708,10 +1790,13 @@ class SECoursesReferenceGallery:
         batch_run_id="",
         batch_item_index=-1,
         batch_item_count=0,
+        match_batch_init_media=False,
     ):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
-        folder_batch = _collect_folder_batch(batch_folder, manifest, video_fps, max_seconds)
+        folder_batch = _collect_folder_batch(
+            batch_folder, manifest, video_fps, max_seconds, bool(match_batch_init_media)
+        )
         if folder_batch is not None:
             packs, prompts = folder_batch
             run_id = str(batch_run_id or "").strip()
@@ -1781,6 +1866,7 @@ class SECoursesReferenceGallery:
         batch_run_id="",
         batch_item_index=-1,
         batch_item_count=0,
+        match_batch_init_media=False,
     ):
         digest = hashlib.sha256()
         digest.update(
@@ -1793,6 +1879,7 @@ class SECoursesReferenceGallery:
                     str(batch_folder),
                     bool(merge_batch_videos),
                     bool(continue_batch_with_last_frame),
+                    bool(match_batch_init_media),
                     str(batch_run_id),
                     int(batch_item_index),
                     int(batch_item_count),
@@ -1838,6 +1925,7 @@ class SECoursesReferenceGallery:
         batch_run_id="",
         batch_item_index=-1,
         batch_item_count=0,
+        match_batch_init_media=False,
     ):
         try:
             manifest = _parse_manifest(references)
@@ -1890,7 +1978,8 @@ class SECoursesBatchDuration:
     FUNCTION = "resolve"
     DESCRIPTION = (
         "Uses the positive integer suffix in a folder prompt filename such as 'scene_8.txt' as that prompt's "
-        "duration. Filenames without an underscore-integer suffix use the connected default duration."
+        "duration. A matched folder-batch init audio uses its own duration; otherwise filenames without an "
+        "underscore-integer suffix use the connected default duration."
     )
 
     def resolve(self, references, default_duration_seconds):
@@ -1898,6 +1987,12 @@ class SECoursesBatchDuration:
         if not math.isfinite(default) or default <= 0:
             raise ValueError("The default MiniMax H3 duration must be a positive finite number.")
         batch = references.get("batch") if isinstance(references, dict) else None
+        init_audio = references.get("init_audio") if isinstance(references, dict) else None
+        if init_audio:
+            duration = _audio_duration_seconds(_resolve_reference_entry(init_audio))
+            if duration <= 0:
+                raise ValueError(f"Folder-batch init audio '{init_audio['name']}' is empty.")
+            return (duration,)
         override = batch.get("duration_seconds") if isinstance(batch, dict) else None
         return (float(override) if override is not None else default,)
 
@@ -2637,6 +2732,15 @@ class SECoursesMiniMaxH3Auto:
             raise ValueError("The references input must come from a SECourses Reference Gallery node.")
         if isinstance(continuation_frame, dict) and set(continuation_frame).issubset({"image"}):
             continuation_frame = continuation_frame.get("image")
+        init_image = references.get("init_image")
+        if init_image:
+            continuation_frame = _load_reference_image(
+                _resolve_reference_entry(init_image), int(width), int(height)
+            )
+            print(
+                f"[SECoursesMiniMaxH3Auto] using folder-batch init image '{init_image['name']}'.",
+                flush=True,
+            )
         has_references = any(references.get(kind) for kind in ("images", "videos", "audios"))
         if has_references:
             positive, latent = SECoursesMiniMaxH3References().encode(

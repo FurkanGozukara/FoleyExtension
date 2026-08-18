@@ -55,19 +55,20 @@ class OptionalImageTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as directory:
             Path(directory, "z.png").touch()
             Path(directory, "a.jpg").touch()
+            Path(directory, "design.psd").touch()
             Path(directory, "notes.txt").touch()
-            with (
-                mock.patch.object(optional_image_nodes.folder_paths, "get_input_directory", return_value=directory),
-                mock.patch.object(
-                    optional_image_nodes.folder_paths,
-                    "filter_files_content_types",
-                    side_effect=lambda files, _types: [name for name in files if name.endswith((".png", ".jpg"))],
-                ),
-            ):
+            with mock.patch.object(optional_image_nodes.folder_paths, "get_input_directory", return_value=directory):
                 image_spec = optional_image_nodes.SECoursesOptionalImage.INPUT_TYPES()["required"]["image"]
 
-        self.assertEqual(image_spec[0], ["(none - disabled)", "a.jpg", "z.png"])
+        self.assertEqual(image_spec[0], ["(none - disabled)", "a.jpg", "design.psd", "z.png"])
         self.assertIs(image_spec[1]["image_upload"], True)
+
+    def test_required_loader_delegates_to_core_image_node(self):
+        node = optional_image_nodes.SECoursesLoadImage()
+
+        self.assertEqual(node.load_image("start.psd"), ("pixels:start.psd", "mask"))
+        self.assertEqual(node.IS_CHANGED("start.psd"), "hash:start.psd")
+        self.assertEqual(node.VALIDATE_INPUTS("start.psd"), "valid:start.psd")
 
 
 if __name__ == "__main__":

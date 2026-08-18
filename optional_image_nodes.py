@@ -5,18 +5,62 @@ import os
 import folder_paths
 import nodes
 
+try:
+    from .media_extensions import has_extension, image_extensions
+except ImportError:  # direct test-module import
+    from media_extensions import has_extension, image_extensions
+
+
+def _input_images():
+    input_dir = folder_paths.get_input_directory()
+    return sorted(
+        name
+        for name in os.listdir(input_dir)
+        if os.path.isfile(os.path.join(input_dir, name))
+        and has_extension(name, image_extensions())
+    )
+
+
+class SECoursesLoadImage:
+    """Core-compatible image loader whose picker exposes every supported format."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "image": (_input_images(), {
+                    "image_upload": True,
+                    "tooltip": "Select or upload any still-image format supported by this ComfyUI installation.",
+                }),
+            }
+        }
+
+    CATEGORY = "SECourses/image"
+    RETURN_TYPES = ("IMAGE", "MASK")
+    RETURN_NAMES = ("image", "mask")
+    FUNCTION = "load_image"
+    DESCRIPTION = "Loads any still-image format supported by the installed Pillow/ComfyUI decoders."
+
+    def load_image(self, image):
+        return nodes.LoadImage().load_image(image)
+
+    @classmethod
+    def IS_CHANGED(cls, image):
+        return nodes.LoadImage.IS_CHANGED(image)
+
+    @classmethod
+    def VALIDATE_INPUTS(cls, image):
+        return nodes.LoadImage.VALIDATE_INPUTS(image)
+
 
 class SECoursesOptionalImage:
     NO_IMAGE = "(none - disabled)"
 
     @classmethod
     def INPUT_TYPES(cls):
-        input_dir = folder_paths.get_input_directory()
-        files = [name for name in os.listdir(input_dir) if os.path.isfile(os.path.join(input_dir, name))]
-        files = folder_paths.filter_files_content_types(files, ["image"])
         return {
             "required": {
-                "image": ([cls.NO_IMAGE, *sorted(files)], {
+                "image": ([cls.NO_IMAGE, *_input_images()], {
                     "image_upload": True,
                     "tooltip": "No image is emitted until a file is selected. Uploading or selecting one enables the connected optional image input automatically.",
                 }),
@@ -49,9 +93,11 @@ class SECoursesOptionalImage:
 
 
 NODE_CLASS_MAPPINGS = {
+    "SECoursesLoadImage": SECoursesLoadImage,
     "SECoursesOptionalImage": SECoursesOptionalImage,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "SECoursesLoadImage": "Load Image (All Supported Formats)",
     "SECoursesOptionalImage": "Optional Image (Auto Enable)",
 }

@@ -56,6 +56,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     filenames use Windows-style natural ordering (`1`, `2`, `10`) on Windows
     and Linux alike; that order assigns `@image1`, `@image2`, and the other
     numbered reference slots.
+  - MiniMax H3 video presets enable **same-basename init media**: `shot.txt` +
+    `shot.png` (or any other supported still-image extension) runs image to
+    video; `shot.txt` + `shot.mp3` (or any supported audio extension) runs
+    audio to video; providing both combines the first-frame image and locked
+    soundtrack. Same-name init files are reserved for their prompt and are not
+    also attached as references. Unmatched media remains reference material.
   - **Continue from last frame** is available beside the video merge control
     and is off by default. The first item starts normally. After every later
     prompt, only the preceding saved video's final frame is decoded and used as
@@ -132,6 +138,9 @@ text-only, first-frame, and reference generation with or without init audio.
   default the audio's own length (`match init audio length`), otherwise the
   connected workflow duration (`keep workflow duration`, longer audio is cut,
   shorter audio is padded with silence).
+- Single-file image and init-audio pickers expose every still-image and audio
+  container supported by the installed ComfyUI/Pillow/FFmpeg decoders; init
+  audio also accepts video containers and extracts their soundtrack.
 - **MiniMax H3 Init Audio (Optional)** sits between any MiniMax H3 conditioning
   node (Image to Video, the gallery Auto / References adapters, Reference to
   Video) and the guider/sampler. With init audio connected it encodes the

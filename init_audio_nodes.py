@@ -30,6 +30,11 @@ import os
 
 import torch
 
+try:
+    from .media_extensions import audio_input_extensions, has_extension
+except ImportError:  # direct test-module import
+    from media_extensions import audio_input_extensions, has_extension
+
 NO_AUDIO = "(none - disabled)"
 DURATION_MATCH = "match init audio length"
 DURATION_KEEP = "keep workflow duration"
@@ -126,7 +131,11 @@ class SECoursesInitAudio:
 
         input_dir = folder_paths.get_input_directory()
         os.makedirs(input_dir, exist_ok=True)
-        files = folder_paths.filter_files_content_types(os.listdir(input_dir), ["audio", "video"])
+        files = [
+            name for name in os.listdir(input_dir)
+            if os.path.isfile(os.path.join(input_dir, name))
+            and has_extension(name, audio_input_extensions())
+        ]
         return {
             "required": {
                 "audio": ([NO_AUDIO, *sorted(files)], {
@@ -200,6 +209,9 @@ class SECoursesMiniMaxH3InitAudio:
                     "default": CONDITIONING_MODES[0],
                     "tooltip": "'lock soundtrack + guide' (recommended) keeps the given audio exact and shows it to the model from the first step. 'lock soundtrack only' keeps it exact without the guide. 'guide only' lets the model generate its own audio while following the given one, so the output soundtrack is the model's.",
                 }),
+                "references": ("SECOURSES_REF_PACK", {
+                    "tooltip": "Optional folder-batch pack. A same-basename audio file in an init-media-enabled batch overrides the single INIT AUDIO selection for this item.",
+                }),
             },
         }
 
@@ -215,7 +227,19 @@ class SECoursesMiniMaxH3InitAudio:
         "length (or nothing), ready to replace the decoded audio in the final video."
     )
 
-    def apply(self, positive, latent, audio_vae, init_audio=None, audio_conditioning=CONDITIONING_MODES[0]):
+    def apply(self, positive, latent, audio_vae, init_audio=None, audio_conditioning=CONDITIONING_MODES[0], references=None):
+        batch_audio = references.get("init_audio") if isinstance(references, dict) else None
+        if batch_audio:
+            try:
+                from .reference_gallery_nodes import _load_reference_audio, _resolve_reference_entry
+            except ImportError:  # direct test-module import
+                from reference_gallery_nodes import _load_reference_audio, _resolve_reference_entry
+            seconds = video_frame_count(_av_parts(latent)[0]) / FPS
+            init_audio = _load_reference_audio(_resolve_reference_entry(batch_audio), seconds)
+            print(
+                f"[SECoursesMiniMaxH3InitAudio] using folder-batch init audio '{batch_audio['name']}'.",
+                flush=True,
+            )
         if init_audio is None:
             return (positive, latent, None)
         if not isinstance(init_audio, dict) or "waveform" not in init_audio or "sample_rate" not in init_audio:
