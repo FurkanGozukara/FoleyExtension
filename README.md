@@ -119,6 +119,39 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.
 
+## Optional init audio (MiniMax H3)
+
+An optional soundtrack the generated video must follow, the same idea as the
+optional init image: nothing happens until a file is selected, and every node
+passes its inputs through untouched without one, so a single preset covers
+text-only, first-frame, and reference generation with or without init audio.
+
+- **Init Audio (Optional, Auto Enable)** — an audio file selector with upload
+  button and player (video files contribute their soundtrack). It emits the
+  loaded audio (or nothing) plus the duration the workflow should use: by
+  default the audio's own length (`match init audio length`), otherwise the
+  connected workflow duration (`keep workflow duration`, longer audio is cut,
+  shorter audio is padded with silence).
+- **MiniMax H3 Init Audio (Optional)** sits between any MiniMax H3 conditioning
+  node (Image to Video, the gallery Auto / References adapters, Reference to
+  Video) and the guider/sampler. With init audio connected it encodes the
+  soundtrack with the audio VAE, locks it into the joint AV latent with a
+  nested noise mask (video denoised, audio kept exact at every step) and adds
+  a t=1.0 audio guide at frame 0 through ComfyUI's native
+  `MiniMaxH3AddGuide` keyframe mechanism, so the transformer reads the clean
+  soundtrack from the first step and generates lipsync, action timing, and
+  ambience to match it. This mirrors the `multimodalart/minimax-h3-audio-to-video`
+  Space's locked audio rows using only mechanisms core ComfyUI already has, and
+  it works identically for FL2VA (text / first frame) and Ref2VA (references),
+  including folder batches. `audio_conditioning` also offers `lock soundtrack
+  only` and `guide only (model re-voices)`. The `init_audio` output is the
+  normalized 32 kHz stereo soundtrack cut to the video length, so the final
+  MP4 carries the user's audio instead of a VAE round trip.
+- **Audio Fallback (Optional Override)** returns that init audio when present
+  and otherwise the decoded generated audio (which is then not even decoded).
+- **MiniMax H3 Frames From Init Audio** turns an optional init audio into the
+  24 FPS `17k+5` frame count (used by the SwarmUI extension).
+
 ## Synchronized resolution controls
 
 **SECourses Resolution Sync** keeps aspect ratio, megapixels, width, and height
