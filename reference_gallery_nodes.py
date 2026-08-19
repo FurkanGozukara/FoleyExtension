@@ -1511,7 +1511,9 @@ def _decode_video_audio(path, max_seconds, trim_start=0.0):
     """Returns the video's soundtrack as a ComfyUI AUDIO dict, or None when it has no usable audio.
 
     ``trim_start`` skips the first seconds of the soundtrack; ``max_seconds``
-    then caps the duration kept from that point.
+    then caps the duration kept from that point (``None`` keeps everything up
+    to the end of the stream). Decoding seeks to the trim start and stops at
+    the cap, so a short window of a long file stays fast.
     """
     import av
     import torch
@@ -1526,7 +1528,7 @@ def _decode_video_audio(path, max_seconds, trim_start=0.0):
             if not sample_rate:
                 return None
             n_channels = stream.channels or 1
-            max_samples = int(max_seconds * sample_rate)
+            max_samples = None if max_seconds is None else int(max_seconds * sample_rate)
             start_target = None
             if trim_start > 0.0:
                 start_target = _stream_start_seconds(container, stream) + trim_start
@@ -1548,11 +1550,13 @@ def _decode_video_audio(path, max_seconds, trim_start=0.0):
                     start_target = None  # aligned with the trim start; keep every later frame
                 chunks.append(buffer)
                 collected += buffer.shape[1]
-                if collected >= max_samples:
+                if max_samples is not None and collected >= max_samples:
                     break
             if not chunks:
                 return None
-            waveform = torch.cat(chunks, dim=1)[:, :max_samples]
+            waveform = torch.cat(chunks, dim=1)
+            if max_samples is not None:
+                waveform = waveform[:, :max_samples]
     except (av.error.FFmpegError, OSError):
         return None
     waveform = _f32_pcm(waveform)

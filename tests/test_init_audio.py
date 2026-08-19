@@ -1,6 +1,10 @@
+import math
+import os
+import struct
 import sys
 import tempfile
 import unittest
+import wave
 from pathlib import Path
 from types import SimpleNamespace
 from unittest import mock
@@ -72,34 +76,77 @@ class HelperTests(unittest.TestCase):
         self.assertEqual(init_audio.video_frame_count(torch.zeros((1, 24, 37, 4, 4))), 124)
 
 
+def _write_wav(path, seconds, rate=16000):
+    """Mono 16-bit WAV whose sample value encodes its index, so trims can be checked sample-exactly."""
+    frames = int(seconds * rate)
+    with wave.open(str(path), "wb") as handle:
+        handle.setnchannels(1)
+        handle.setsampwidth(2)
+        handle.setframerate(rate)
+        handle.writeframes(b"".join(struct.pack("<h", index % 30000) for index in range(frames)))
+
+
+def _write_mp4_with_soundtrack(path, seconds, rate=48000):
+    """Small H.264 video with an AAC soundtrack whose amplitude ramps with time (0 -> 1)."""
+    import av
+    import numpy as np
+
+    t = np.arange(int(seconds * rate)) / rate
+    tone = (np.sin(2 * np.pi * 440 * t) * (t / seconds)).astype(np.float32)
+    with av.open(str(path), mode="w") as container:
+        audio_stream = container.add_stream("aac", rate=rate)
+        audio_stream.layout = "mono"
+        video_stream = container.add_stream("libx264", rate=12)
+        video_stream.width, video_stream.height, video_stream.pix_fmt = 64, 48, "yuv420p"
+        for index in range(int(seconds * 12)):
+            pixels = np.full((48, 64, 3), (index * 4) % 255, dtype=np.uint8)
+            for packet in video_stream.encode(av.VideoFrame.from_ndarray(pixels, format="rgb24")):
+                container.mux(packet)
+        for packet in video_stream.encode():
+            container.mux(packet)
+        pts = 0
+        for offset in range(0, len(tone), 1024):
+            piece = tone[offset:offset + 1024]
+            frame = av.AudioFrame.from_ndarray(piece.reshape(1, -1), format="flt", layout="mono")
+            frame.sample_rate = rate
+            frame.pts = pts
+            pts += piece.shape[0]
+            for packet in audio_stream.encode(frame):
+                container.mux(packet)
+        for packet in audio_stream.encode():
+            container.mux(packet)
+
+
+class TrimWindowTests(unittest.TestCase):
+    def test_zero_means_whole_file(self):
+        self.assertEqual(init_audio.trim_window(0.0, 0.0), (0.0, None))
+        self.assertEqual(init_audio.trim_window(None, None), (0.0, None))
+        self.assertEqual(init_audio.trim_window(2.5, 0), (2.5, None))
+        self.assertEqual(init_audio.trim_window(1.5, 4.0), (1.5, 4.0))
+        self.assertEqual(init_audio.describe_trim_window(0.0, None), "")
+        self.assertEqual(init_audio.describe_trim_window(2.5, None), " (trimmed 2.50s-end)")
+        self.assertEqual(init_audio.describe_trim_window(1.5, 4.0), " (trimmed 1.50s-4.00s)")
+
+    def test_rejects_inverted_negative_or_non_finite_windows(self):
+        for start, end in ((3.0, 3.0), (3.0, 2.0), (-1.0, 0.0), (0.0, -2.0), (math.nan, 0.0), (0.0, math.inf), ("x", 0)):
+            with self.assertRaises(ValueError, msg=f"{start}, {end}"):
+                init_audio.trim_window(start, end)
+
+
 class InitAudioLoaderTests(unittest.TestCase):
     def test_disabled_passes_duration_through(self):
         node = init_audio.SECoursesInitAudio()
         self.assertEqual(node.load(init_audio.NO_AUDIO, 6.5), (None, 6.5))
+        self.assertEqual(node.load(init_audio.NO_AUDIO, 6.5, init_audio.DURATION_KEEP, 3.0, 1.0), (None, 6.5))
         self.assertEqual(node.IS_CHANGED(init_audio.NO_AUDIO), init_audio.NO_AUDIO)
         self.assertIs(node.VALIDATE_INPUTS(init_audio.NO_AUDIO), True)
+        self.assertIs(node.VALIDATE_INPUTS(init_audio.NO_AUDIO, 9.0, 1.0), True)
 
     def test_selected_file_drives_duration_by_mode(self):
         loaded = audio(7.3)
-
-        class Output:
-            args = (loaded,)
-
-        class FakeLoadAudio:
-            @classmethod
-            def execute(cls, name):
-                return Output()
-
-            @classmethod
-            def fingerprint_inputs(cls, name):
-                return f"hash:{name}"
-
-            @classmethod
-            def validate_inputs(cls, name):
-                return True
-
         node = init_audio.SECoursesInitAudio()
-        with mock.patch.object(init_audio, "_load_audio_node", return_value=FakeLoadAudio):
+        with mock.patch.object(init_audio, "load_audio_window", return_value=loaded) as loader, \
+                mock.patch.object(init_audio, "input_file_fingerprint", side_effect=lambda name: f"hash:{name}"):
             result, seconds = node.load("voice.wav", 5.0, init_audio.DURATION_MATCH)
             self.assertIs(result, loaded)
             self.assertAlmostEqual(seconds, 7.3, places=5)
@@ -107,6 +154,26 @@ class InitAudioLoaderTests(unittest.TestCase):
             self.assertIs(result, loaded)
             self.assertEqual(seconds, 5.0)
             self.assertEqual(node.IS_CHANGED("voice.wav"), "hash:voice.wav")
+        self.assertEqual([call.args for call in loader.call_args_list], [("voice.wav", 0.0, None)] * 2)
+
+    def test_trim_window_reaches_the_loader_and_drives_duration(self):
+        loaded = audio(2.5)
+        node = init_audio.SECoursesInitAudio()
+        with mock.patch.object(init_audio, "load_audio_window", return_value=loaded) as loader:
+            result, seconds = node.load("clip.mp4", 5.0, init_audio.DURATION_MATCH, trim_start=1.5, trim_end=4.0)
+            self.assertIs(result, loaded)
+            self.assertAlmostEqual(seconds, 2.5, places=5)
+            result, seconds = node.load("clip.mp4", 5.0, init_audio.DURATION_KEEP, trim_start=1.5, trim_end=0.0)
+            self.assertEqual(seconds, 5.0)
+        self.assertEqual([call.args for call in loader.call_args_list], [("clip.mp4", 1.5, 4.0), ("clip.mp4", 1.5, None)])
+        with self.assertRaises(ValueError):
+            node.load("clip.mp4", 5.0, init_audio.DURATION_MATCH, trim_start=4.0, trim_end=1.5)
+
+    def test_validate_inputs_reports_bad_trim_before_touching_the_file(self):
+        with mock.patch.object(init_audio, "_load_audio_node") as loader:
+            message = init_audio.SECoursesInitAudio.VALIDATE_INPUTS("voice.wav", 4.0, 2.0)
+        self.assertIn("trim_end", str(message))
+        loader.assert_not_called()
 
     def test_picker_lists_extended_audio_and_video_containers(self):
         with tempfile.TemporaryDirectory() as directory:
@@ -115,9 +182,80 @@ class InitAudioLoaderTests(unittest.TestCase):
             import folder_paths
 
             with mock.patch.object(folder_paths, "get_input_directory", return_value=directory):
-                choices = init_audio.SECoursesInitAudio.INPUT_TYPES()["required"]["audio"][0]
+                types = init_audio.SECoursesInitAudio.INPUT_TYPES()
+        self.assertEqual(types["required"]["audio"][0], [init_audio.NO_AUDIO, "clip.wmv", "music.m4b", "voice.ape"])
+        self.assertEqual(list(types["optional"]), ["trim_start", "trim_end"])
+        for name in ("trim_start", "trim_end"):
+            kind, options = types["optional"][name]
+            self.assertEqual(kind, "FLOAT")
+            self.assertEqual((options["default"], options["min"]), (0.0, 0.0))
 
-        self.assertEqual(choices, [init_audio.NO_AUDIO, "clip.wmv", "music.m4b", "voice.ape"])
+
+class AudioWindowDecodeTests(unittest.TestCase):
+    """Real files through the seek-aware window loader (audio files and video soundtracks)."""
+
+    def setUp(self):
+        import folder_paths
+
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.root = Path(self.tmp.name)
+        patcher = mock.patch.object(folder_paths, "get_input_directory", return_value=self.tmp.name)
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
+    def test_wav_window_is_sample_exact(self):
+        rate = 16000
+        _write_wav(self.root / "voice.wav", 6.0, rate)
+        full = init_audio.load_audio_window("voice.wav")
+        self.assertEqual(tuple(full["waveform"].shape), (1, 1, 6 * rate))
+        self.assertEqual(full["sample_rate"], rate)
+
+        window = init_audio.load_audio_window("voice.wav", 1.5, 4.0)
+        self.assertEqual(tuple(window["waveform"].shape), (1, 1, int(2.5 * rate)))
+        first = round(window["waveform"][0, 0, 0].item() * 32768)
+        last = round(window["waveform"][0, 0, -1].item() * 32768)
+        self.assertEqual((first, last), (int(1.5 * rate) % 30000, (int(4.0 * rate) - 1) % 30000))
+
+        tail = init_audio.load_audio_window("voice.wav", 5.0, None)
+        self.assertEqual(tuple(tail["waveform"].shape), (1, 1, rate))
+        self.assertEqual(round(tail["waveform"][0, 0, 0].item() * 32768), int(5.0 * rate) % 30000)
+
+    def test_video_soundtrack_window(self):
+        try:
+            _write_mp4_with_soundtrack(self.root / "clip.mp4", 6.0)
+        except Exception as error:  # pragma: no cover - depends on the FFmpeg build
+            self.skipTest(f"PyAV cannot write an H.264/AAC MP4 here: {error}")
+        full = init_audio.load_audio_window("clip.mp4")
+        self.assertEqual(full["sample_rate"], 48000)
+        self.assertAlmostEqual(init_audio.audio_duration_seconds(full), 6.0, delta=0.1)
+
+        window = init_audio.load_audio_window("clip.mp4", 3.0, 5.0)
+        self.assertAlmostEqual(init_audio.audio_duration_seconds(window), 2.0, delta=0.01)
+        wave_ = window["waveform"][0, 0]
+        # The tone's amplitude ramps 0 -> 1 over the 6 s, so the window must start around 3/6 and end around 5/6.
+        self.assertAlmostEqual(wave_[:4800].abs().max().item(), 0.5, delta=0.08)
+        self.assertAlmostEqual(wave_[-4800:].abs().max().item(), 0.83, delta=0.08)
+
+        node = init_audio.SECoursesInitAudio()
+        loaded, seconds = node.load("clip.mp4", 5.0, init_audio.DURATION_MATCH, trim_start=3.0, trim_end=5.0)
+        self.assertAlmostEqual(seconds, 2.0, delta=0.01)
+        self.assertEqual(loaded["sample_rate"], 48000)
+
+    def test_trim_start_past_the_end_is_a_clear_error(self):
+        _write_wav(self.root / "short.wav", 1.0)
+        with self.assertRaises(ValueError) as caught:
+            init_audio.load_audio_window("short.wav", 5.0, None)
+        self.assertIn("after its 5.00s trim start", str(caught.exception))
+
+    def test_fingerprint_hashes_small_files_and_stats_large_ones(self):
+        _write_wav(self.root / "voice.wav", 0.5)
+        hashed = init_audio.input_file_fingerprint("voice.wav")
+        self.assertEqual(len(hashed), 64)
+        with mock.patch.object(init_audio, "HASH_FINGERPRINT_LIMIT", 10):
+            stat = os.stat(self.root / "voice.wav")
+            self.assertEqual(init_audio.input_file_fingerprint("voice.wav"), f"{stat.st_size}:{stat.st_mtime_ns}:voice.wav")
+        self.assertEqual(init_audio.input_file_fingerprint("missing.wav"), "missing:missing.wav")
 
 
 class FramesTests(unittest.TestCase):

@@ -5,6 +5,12 @@ selected, and every node here passes its inputs through untouched when no
 init audio arrives, so one workflow serves text-only, first-frame, and
 reference generation with or without a soundtrack.
 
+The file may be an audio file or a video (its soundtrack is used), and an
+optional trim window (``trim_start`` / ``trim_end`` seconds, set visually by
+the trim panel under the player) keeps only one part of it. Decoding seeks to
+the trim start and stops at the trim end, so a short window of a long video
+stays fast and the file itself is never re-encoded.
+
 ``SECoursesMiniMaxH3InitAudio`` conditions MiniMax H3 the way the
 ``multimodalart/minimax-h3-audio-to-video`` Space does with diffusers, using
 only mechanisms ComfyUI's native MiniMax H3 implementation already has:
@@ -36,6 +42,10 @@ except ImportError:  # direct test-module import
     from media_extensions import audio_input_extensions, has_extension
 
 NO_AUDIO = "(none - disabled)"
+TRIM_MAX_SECONDS = 360000.0
+# Files up to this size are content-hashed like core LoadAudio; larger uploads
+# (long videos used for their soundtrack) are fingerprinted by size and mtime.
+HASH_FINGERPRINT_LIMIT = 64 * 1024 * 1024
 DURATION_MATCH = "match init audio length"
 DURATION_KEEP = "keep workflow duration"
 CONDITIONING_MODES = ["lock soundtrack + guide", "lock soundtrack only", "guide only (model re-voices)"]
@@ -122,8 +132,81 @@ def _av_parts(latent):
     return parts[0], parts[1]
 
 
+def trim_window(trim_start=0.0, trim_end=0.0):
+    """Validated ``(start_seconds, end_seconds | None)`` of the optional trim inputs.
+
+    ``trim_end`` of 0 means "until the end of the file", so ``(0.0, None)`` is
+    the untrimmed whole file. Raises ``ValueError`` for negative, non-finite,
+    or inverted windows.
+    """
+    try:
+        start = float(trim_start or 0.0)
+        end = float(trim_end or 0.0)
+    except (TypeError, ValueError) as error:
+        raise ValueError("Init audio trim_start and trim_end must be seconds.") from error
+    if not math.isfinite(start) or not math.isfinite(end) or start < 0.0 or end < 0.0:
+        raise ValueError("Init audio trim_start and trim_end must be non-negative seconds (0 = no trim).")
+    if end <= 0.0:
+        return start, None
+    if end <= start:
+        raise ValueError(
+            f"Init audio trim_end ({end:.2f}s) must be after trim_start ({start:.2f}s); "
+            "set trim_end to 0 to use the file until its end."
+        )
+    return start, end
+
+
+def describe_trim_window(start, end):
+    """Human-readable suffix for log lines, empty when the whole file is used."""
+    if end is None and start <= 0.0:
+        return ""
+    end_text = "end" if end is None else f"{end:.2f}s"
+    return f" (trimmed {start:.2f}s-{end_text})"
+
+
+def load_audio_window(audio, trim_start=0.0, trim_end=None):
+    """ComfyUI AUDIO of an input-directory audio or video file, optionally only ``[trim_start, trim_end)`` seconds.
+
+    Uses the reference gallery's seek-aware decoder: a video's first audio
+    stream is decoded from the trim start and stops at the trim end, so a
+    10 second window of a two hour recording stays fast.
+    """
+    import folder_paths
+
+    try:
+        from .reference_gallery_nodes import _decode_video_audio
+    except ImportError:  # direct test-module import
+        from reference_gallery_nodes import _decode_video_audio
+
+    path = folder_paths.get_annotated_filepath(audio)
+    start = max(0.0, float(trim_start or 0.0))
+    window = None if trim_end is None else max(0.0, float(trim_end) - start)
+    loaded = _decode_video_audio(path, window, trim_start=start)
+    if loaded is None:
+        where = f" after its {start:.2f}s trim start" if start > 0.0 else ""
+        raise ValueError(
+            f"Init audio '{audio}' has no decodable audio stream{where}. "
+            "Pick an audio file or a video with a soundtrack, or move the trim start earlier."
+        )
+    return loaded
+
+
+def input_file_fingerprint(audio):
+    """Cache fingerprint of an input-directory file: content hash, or size+mtime for very large uploads."""
+    import folder_paths
+
+    path = folder_paths.get_annotated_filepath(audio)
+    try:
+        size = os.path.getsize(path)
+    except OSError:
+        return f"missing:{audio}"
+    if size > HASH_FINGERPRINT_LIMIT:
+        return f"{size}:{os.stat(path).st_mtime_ns}:{audio}"
+    return _load_audio_node().fingerprint_inputs(audio)
+
+
 class SECoursesInitAudio:
-    """Optional init audio file plus the workflow duration it drives."""
+    """Optional init audio or video file (soundtrack) with an optional trim window, plus the duration it drives."""
 
     @classmethod
     def INPUT_TYPES(cls):
@@ -140,7 +223,7 @@ class SECoursesInitAudio:
             "required": {
                 "audio": ([NO_AUDIO, *sorted(files)], {
                     "audio_upload": True,
-                    "tooltip": "No audio is emitted until a file is selected. Uploading or selecting one enables init audio: the generated video follows this soundtrack (lipsync, action timing) and keeps it as its audio track. Video files contribute their soundtrack.",
+                    "tooltip": "No audio is emitted until a file is selected. Upload or select an audio file, or a video whose soundtrack should be used: the generated video follows this audio (lipsync, action timing) and keeps it as its audio track. The trim panel under the player keeps only one part of the file.",
                 }),
                 "duration_seconds": ("FLOAT", {
                     "default": 5.0, "min": 0.01, "max": 3600.0, "step": 0.01,
@@ -148,9 +231,19 @@ class SECoursesInitAudio:
                 }),
                 "duration_mode": ([DURATION_MATCH, DURATION_KEEP], {
                     "default": DURATION_MATCH,
-                    "tooltip": "'match init audio length' makes the video as long as the selected audio (rounded up to the model's frame grid). 'keep workflow duration' keeps the connected duration; longer audio is cut and shorter audio is padded with silence.",
+                    "tooltip": "'match init audio length' makes the video as long as the selected audio (the trimmed part, rounded up to the model's frame grid). 'keep workflow duration' keeps the connected duration; longer audio is cut and shorter audio is padded with silence.",
                 }),
-            }
+            },
+            "optional": {
+                "trim_start": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": TRIM_MAX_SECONDS, "step": 0.01,
+                    "tooltip": "Use the file from this many seconds in (0 = from the beginning). Set visually with the trim panel under the player; the part before it is skipped without re-encoding the file.",
+                }),
+                "trim_end": ("FLOAT", {
+                    "default": 0.0, "min": 0.0, "max": TRIM_MAX_SECONDS, "step": 0.01,
+                    "tooltip": "Use the file up to this many seconds (0 = until the end of the file). Must be later than trim_start; set visually with the trim panel under the player.",
+                }),
+            },
         }
 
     CATEGORY = "SECourses/audio"
@@ -158,35 +251,50 @@ class SECoursesInitAudio:
     RETURN_NAMES = ("init_audio", "duration_seconds")
     FUNCTION = "load"
     DESCRIPTION = (
-        "Optional init audio, enabled automatically when a file is selected. Outputs the loaded audio (or nothing) "
-        "and the duration the workflow should use: the audio's own length by default, otherwise the connected value."
+        "Optional init audio, enabled automatically when a file is selected: an audio file, or a video whose "
+        "soundtrack is used. An optional trim window (trim_start / trim_end seconds, set visually in the trim panel "
+        "under the player) keeps only one part of it. Outputs the loaded audio (or nothing) and the duration the "
+        "workflow should use: the (trimmed) audio's own length by default, otherwise the connected value."
     )
 
-    def load(self, audio, duration_seconds, duration_mode=DURATION_MATCH):
+    def load(self, audio, duration_seconds, duration_mode=DURATION_MATCH, trim_start=0.0, trim_end=0.0):
         duration = float(duration_seconds)
         if not audio or audio == NO_AUDIO:
             return (None, duration)
-        loaded = _load_audio_node().execute(audio).args[0]
+        start, end = trim_window(trim_start, trim_end)
+        loaded = load_audio_window(audio, start, end)
         seconds = audio_duration_seconds(loaded)
         if seconds <= 0:
-            raise ValueError(f"Init audio '{audio}' is empty.")
+            raise ValueError(f"Init audio '{audio}' is empty{describe_trim_window(start, end)}.")
+        window = describe_trim_window(start, end)
         if duration_mode == DURATION_MATCH:
             note = " (longer than the quality-tested 15 second range, allowed but experimental)" if seconds > 15 else ""
-            print(f"[SECoursesInitAudio] '{audio}' is {seconds:.2f}s; the video follows the audio length{note}.", flush=True)
+            print(
+                f"[SECoursesInitAudio] '{audio}'{window} is {seconds:.2f}s; the video follows the audio length{note}.",
+                flush=True,
+            )
             return (loaded, seconds)
-        print(f"[SECoursesInitAudio] '{audio}' is {seconds:.2f}s; keeping the workflow duration of {duration:.2f}s.", flush=True)
+        print(
+            f"[SECoursesInitAudio] '{audio}'{window} is {seconds:.2f}s; keeping the workflow duration of {duration:.2f}s.",
+            flush=True,
+        )
         return (loaded, duration)
 
     @classmethod
-    def IS_CHANGED(cls, audio, duration_seconds=None, duration_mode=None):
+    def IS_CHANGED(cls, audio, duration_seconds=None, duration_mode=None, trim_start=0.0, trim_end=0.0):
         if not audio or audio == NO_AUDIO:
             return NO_AUDIO
-        return _load_audio_node().fingerprint_inputs(audio)
+        # The trim inputs are part of the cache key already; only the file content needs a fingerprint.
+        return input_file_fingerprint(audio)
 
     @classmethod
-    def VALIDATE_INPUTS(cls, audio):
+    def VALIDATE_INPUTS(cls, audio, trim_start=0.0, trim_end=0.0):
         if not audio or audio == NO_AUDIO:
             return True
+        try:
+            trim_window(trim_start, trim_end)
+        except ValueError as error:
+            return str(error)
         return _load_audio_node().validate_inputs(audio)
 
 

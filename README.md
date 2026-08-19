@@ -162,12 +162,21 @@ optional init image: nothing happens until a file is selected, and every node
 passes its inputs through untouched without one, so a single preset covers
 text-only, first-frame, and reference generation with or without init audio.
 
-- **Init Audio (Optional, Auto Enable)** — an audio file selector with upload
-  button and player (video files contribute their soundtrack). It emits the
-  loaded audio (or nothing) plus the duration the workflow should use: by
-  default the audio's own length (`match init audio length`), otherwise the
-  connected workflow duration (`keep workflow duration`, longer audio is cut,
-  shorter audio is padded with silence).
+- **Init Audio (Optional, Auto Enable)** — an audio *or video* file selector
+  with upload button (the picker, drag & drop, and paste all accept both; a
+  video contributes its soundtrack and previews as a video player instead of
+  the audio player). A trim panel under the player selects which part of the
+  file to use: a timeline with draggable start/end handles, numeric start/end
+  fields, "start/end here" playhead capture, a trim-window preview, and a
+  whole-file reset. The window is stored in optional `trim_start` / `trim_end`
+  widget values (seconds; 0 end = until the end of the file), the server
+  decodes only that window (seek-based, nothing is re-encoded), and files the
+  browser cannot preview fall back to a server-side duration probe with
+  numeric trimming. The node emits the loaded (trimmed) audio (or nothing)
+  plus the duration the workflow should use: by default the trimmed audio's
+  own length (`match init audio length`), otherwise the connected workflow
+  duration (`keep workflow duration`, longer audio is cut, shorter audio is
+  padded with silence).
 - Single-file image and init-audio pickers expose every still-image and audio
   container supported by the installed ComfyUI/Pillow/FFmpeg decoders; init
   audio also accepts video containers and extracts their soundtrack.
