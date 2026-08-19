@@ -425,6 +425,121 @@ def _register_folder_batch_inspect_route():
     setattr(server, marker, True)
 
 
+_MEDIA_INFO_CACHE = {}
+_MEDIA_INFO_CACHE_LIMIT = 4096
+_MEDIA_INFO_LOCK = threading.Lock()
+
+
+def _media_stream_duration(container, stream):
+    """Seconds of one stream (container duration as the fallback)."""
+    import av
+
+    if stream is not None and stream.duration is not None and stream.time_base is not None:
+        return float(stream.duration * stream.time_base)
+    if container.duration is not None:
+        return float(container.duration / av.time_base)
+    return None
+
+
+def _media_info(path):
+    """Dimensions / duration of an input-directory file, with the decoders the adapters use.
+
+    Returns {"kind": "image"|"video"|"audio", "width", "height", "duration", "has_audio", "fps"};
+    unknown values are None. Used by the gallery's live token estimate, so image sizes follow
+    the same EXIF-oriented reading as _prepare_image_references.
+    """
+    lower = path.lower()
+    suffix = os.path.splitext(lower)[1]
+    if suffix in BATCH_IMAGE_EXTENSIONS:
+        width, height, _orientation = _oriented_image_dimensions(path)
+        return {"kind": "image", "width": width, "height": height, "duration": None, "has_audio": False, "fps": None}
+
+    import av
+
+    with av.open(str(path), mode="r") as container:
+        video_stream = container.streams.video[0] if container.streams.video else None
+        audio_stream = container.streams.audio[0] if container.streams.audio else None
+        # Still images that PIL cannot open (eg HEIC via ffmpeg) also arrive here as one-frame videos.
+        if video_stream is not None and (suffix in BATCH_VIDEO_EXTENSIONS or audio_stream is None):
+            duration = _media_stream_duration(container, video_stream)
+            fps = None
+            try:
+                rate = video_stream.average_rate or video_stream.guessed_rate
+                fps = float(rate) if rate else None
+            except (TypeError, ValueError, ZeroDivisionError):
+                fps = None
+            frames = int(video_stream.frames or 0)
+            if (duration is None or duration <= 0) and frames and fps:
+                duration = frames / fps
+            if suffix not in BATCH_VIDEO_EXTENSIONS and (frames == 1 or (duration is not None and duration <= 0)):
+                return {"kind": "image", "width": int(video_stream.codec_context.width or 0),
+                        "height": int(video_stream.codec_context.height or 0), "duration": None, "has_audio": False, "fps": None}
+            return {"kind": "video", "width": int(video_stream.codec_context.width or 0),
+                    "height": int(video_stream.codec_context.height or 0), "duration": duration,
+                    "has_audio": audio_stream is not None, "fps": fps}
+        if audio_stream is None:
+            raise ValueError(f"No image, video, or audio stream found in '{path}'.")
+        duration = _media_stream_duration(container, audio_stream)
+        if duration is None:
+            duration = _audio_duration_seconds(path)
+        return {"kind": "audio", "width": None, "height": None, "duration": duration, "has_audio": True, "fps": None}
+
+
+def _cached_media_info(file):
+    path = _resolve_reference_path(file)
+    if not path or not os.path.isfile(path):
+        raise ValueError(f"Reference file was not found: {file}")
+    stat = os.stat(path)
+    key = (os.path.normcase(os.path.abspath(path)), int(stat.st_mtime_ns), int(stat.st_size))
+    with _MEDIA_INFO_LOCK:
+        cached = _MEDIA_INFO_CACHE.get(key)
+    if cached is not None:
+        return cached
+    info = _media_info(path)
+    with _MEDIA_INFO_LOCK:
+        if len(_MEDIA_INFO_CACHE) >= _MEDIA_INFO_CACHE_LIMIT:
+            _MEDIA_INFO_CACHE.clear()
+        _MEDIA_INFO_CACHE[key] = info
+    return info
+
+
+def _register_media_info_route():
+    """POST /secourses/media_info {"files": [...]} -> {"<file>": {kind, width, height, duration, has_audio, fps} | {"error": ...}}."""
+    try:
+        from aiohttp import web
+        from server import PromptServer
+    except ImportError:
+        return
+
+    server = getattr(PromptServer, "instance", None)
+    if server is None:
+        return
+    marker = "_secourses_media_info_registered"
+    if getattr(server, marker, False):
+        return
+
+    @server.routes.post("/secourses/media_info")
+    async def media_info(request):
+        try:
+            payload = await request.json()
+        except (ValueError, json.JSONDecodeError):
+            return web.json_response({"error": "invalid JSON body"}, status=400)
+        files = payload.get("files") if isinstance(payload, dict) else None
+        if not isinstance(files, list) or len(files) > 256:
+            return web.json_response({"error": "expected {'files': [up to 256 names]}"}, status=400)
+        result = {}
+        for file in files:
+            if not isinstance(file, str) or not file.strip():
+                continue
+            try:
+                result[file] = _cached_media_info(file)
+            except Exception as error:  # a broken upload must not hide the other files
+                result[file] = {"error": str(error)}
+        return web.json_response(result)
+
+    setattr(server, marker, True)
+
+
 def _batch_media_entries(root, folder):
     by_kind = {"images": [], "videos": [], "audios": []}
     kinds = (
@@ -2880,3 +2995,4 @@ NODE_DISPLAY_NAME_MAPPINGS = {
 }
 
 _register_folder_batch_inspect_route()
+_register_media_info_route()

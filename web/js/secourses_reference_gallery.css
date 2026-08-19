@@ -520,12 +520,71 @@ audio.secourses-refgal-media {
 }
 
 .secourses-refgal-continuationrow {
+    align-items: center;
     display: flex;
     flex: 0 0 auto;
     flex-wrap: wrap;
     gap: 8px;
-    justify-content: flex-end;
+    justify-content: space-between;
     min-width: 0;
+}
+
+/* ==================== Token meter (live packed-sequence estimate) ==================== */
+
+.secourses-refgal-tokens {
+    align-items: center;
+    background: var(--refgal-bg);
+    border: 1px solid var(--refgal-border);
+    border-radius: 6px;
+    color: color-mix(in srgb, var(--refgal-fg) 88%, transparent);
+    cursor: help;
+    display: flex;
+    flex: 1 1 260px;
+    font-size: 11.5px;
+    gap: 8px;
+    height: 34px;
+    min-width: 0;
+    overflow: hidden;
+    padding: 0 10px;
+    position: relative;
+    white-space: nowrap;
+}
+
+.secourses-refgal-tokens-bar {
+    background: color-mix(in srgb, #36a269 32%, transparent);
+    inset: 0 auto 0 0;
+    pointer-events: none;
+    position: absolute;
+    transition: width 0.25s ease, background 0.25s ease;
+}
+
+.secourses-refgal-tokens[data-level="warn"] .secourses-refgal-tokens-bar {
+    background: color-mix(in srgb, #d9a441 36%, transparent);
+}
+
+.secourses-refgal-tokens[data-level="over"] .secourses-refgal-tokens-bar {
+    background: color-mix(in srgb, #d9534f 42%, transparent);
+}
+
+.secourses-refgal-tokens[data-level="critical"] .secourses-refgal-tokens-bar {
+    background: color-mix(in srgb, #ff2d2d 55%, transparent);
+}
+
+.secourses-refgal-tokens[data-level="over"],
+.secourses-refgal-tokens[data-level="critical"] {
+    border-color: color-mix(in srgb, #d9534f 70%, var(--refgal-border));
+}
+
+.secourses-refgal-tokens-text {
+    font-weight: 600;
+    position: relative;
+}
+
+.secourses-refgal-tokens-detail {
+    color: color-mix(in srgb, var(--refgal-fg) 62%, transparent);
+    overflow: hidden;
+    position: relative;
+    text-overflow: ellipsis;
 }
 
 .secourses-refgal-continuationrow[hidden] {

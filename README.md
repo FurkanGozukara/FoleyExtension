@@ -125,6 +125,36 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
 Future reference-driven models only need another small adapter node; the
 gallery node, its manifest format, and the `@` token grammar stay the same.
 
+### Live token meter
+
+The gallery node's bottom row shows the estimated packed-sequence length of the
+generation it feeds — `Tokens ≈38.1k / 109k (35%) · 864×480 · 124f · 5.2s ·
+reference to video` — and updates as you type, add or remove references, or
+change any connected control (resolution, duration, init image, init audio,
+reference max seconds, audio-only mode). MiniMax H3 runs full attention over
+one packed sequence, `[text | keyframes / references | audio | video]`, so this
+number is what drives VRAM and speed. Hover the meter for the breakdown.
+
+- The math is ComfyUI's own `PackedLayout` (`comfy/ldm/minimax/model.py`) plus
+  the adapter's reference sizing rules, reproduced in
+  `web/js/minimax_h3_tokens.js` and verified against it by
+  `tests/minimax_h3_tokens.test.mjs`. Reference sizes and durations come from
+  a small server route (`/secourses/media_info`) that reads them with the same
+  decoders the adapter uses. Only the prompt's Qwen token count is a heuristic
+  (within a few percent); everything else is exact.
+- The graph is read the way ComfyUI will run it: subgraphs are flattened, only
+  the active route through If/Else switches counts (a folder-batch route or an
+  optional face-inpaint pass that will not execute is ignored), and Primitive,
+  Math Expression, Resolution Sync, duration and init-audio helper nodes are
+  evaluated. `~` instead of `≈` means something could not be resolved and was
+  assumed at its cap.
+- MiniMax documents no hard token limit; the budget (109,062) is the packed
+  length of the model's documented maximum output — 15 s at the 768×1344
+  canvas cap — the envelope the released checkpoints were tested for. Above it
+  generation still runs, but slower, with more VRAM and outside the
+  quality-tested range (the bar turns red); above 299,593 the SageAttention
+  kernels overflow int32.
+
 ## Optional init audio (MiniMax H3)
 
 An optional soundtrack the generated video must follow, the same idea as the

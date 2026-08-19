@@ -1,0 +1,673 @@
+[
+ {
+  "name": "target",
+  "spec": {
+   "width": 1344,
+   "height": 768,
+   "frames": 124,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 37710,
+   "video": 37296,
+   "audio": 414,
+   "frames": 124
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 15399,
+   "video": 14985,
+   "audio": 414,
+   "frames": 124
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 640,
+   "height": 640,
+   "frames": 124,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 15214,
+   "video": 14800,
+   "audio": 414,
+   "frames": 124
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 1344,
+   "height": 768,
+   "frames": 362,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 109062,
+   "video": 107856,
+   "audio": 1206,
+   "frames": 362
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 1920,
+   "height": 1088,
+   "frames": 5,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 4096,
+   "video": 4080,
+   "audio": 16,
+   "frames": 5
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 32,
+   "height": 32,
+   "frames": 124,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 451,
+   "video": 37,
+   "audio": 414,
+   "frames": 124
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 736,
+   "height": 416,
+   "frames": 22,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 2167,
+   "video": 2093,
+   "audio": 74,
+   "frames": 22
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 1024,
+   "height": 576,
+   "frames": 243,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 42282,
+   "video": 41472,
+   "audio": 810,
+   "frames": 243
+  }
+ },
+ {
+  "name": "target",
+  "spec": {
+   "width": 1000,
+   "height": 560,
+   "frames": 120,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 21060,
+   "video": 20646,
+   "audio": 414,
+   "frames": 124
+  }
+ },
+ {
+  "name": "fl2va first frame",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "keyframeImages": 1,
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 15804,
+   "keyframes": 405
+  }
+ },
+ {
+  "name": "fl2va first+last + audio guide",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "keyframeImages": 2,
+   "audioGuide": true,
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 16623,
+   "keyframes": 1224
+  }
+ },
+ {
+  "name": "images secourses match",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "secourses",
+   "refImageSize": "match",
+   "refImages": [
+    {
+     "width": 1920,
+     "height": 1080
+    },
+    {
+     "width": 1080,
+     "height": 1920
+    },
+    {
+     "width": 4000,
+     "height": 3000
+    },
+    {
+     "width": 512,
+     "height": 512
+    },
+    {
+     "width": 3840,
+     "height": 2160
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 17261,
+   "refImages": 1862
+  }
+ },
+ {
+  "name": "images secourses max",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "secourses",
+   "refImageSize": "max",
+   "refImages": [
+    {
+     "width": 1920,
+     "height": 1080
+    },
+    {
+     "width": 1080,
+     "height": 1920
+    },
+    {
+     "width": 4000,
+     "height": 3000
+    },
+    {
+     "width": 512,
+     "height": 512
+    },
+    {
+     "width": 3840,
+     "height": 2160
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 32349,
+   "refImages": 16950
+  }
+ },
+ {
+  "name": "images core match",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "core",
+   "refImageSize": "match",
+   "refImages": [
+    {
+     "width": 1920,
+     "height": 1080
+    },
+    {
+     "width": 1080,
+     "height": 1920
+    },
+    {
+     "width": 4000,
+     "height": 3000
+    },
+    {
+     "width": 512,
+     "height": 512
+    },
+    {
+     "width": 3840,
+     "height": 2160
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 17261,
+   "refImages": 1862
+  }
+ },
+ {
+  "name": "images core max",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "core",
+   "refImageSize": "max",
+   "refImages": [
+    {
+     "width": 1920,
+     "height": 1080
+    },
+    {
+     "width": 1080,
+     "height": 1920
+    },
+    {
+     "width": 4000,
+     "height": 3000
+    },
+    {
+     "width": 512,
+     "height": 512
+    },
+    {
+     "width": 3840,
+     "height": 2160
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 32471,
+   "refImages": 17072
+  }
+ },
+ {
+  "name": "video secourses 1920x1080 8.0s len124 max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "secourses",
+   "maxSeconds": 15,
+   "refVideos": [
+    {
+     "width": 1920,
+     "height": 1080,
+     "duration": 8.0,
+     "hasAudio": true
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 28763,
+   "refVideos": 13364,
+   "usedFrames": 124,
+   "canvas": [
+    800,
+    448
+   ]
+  }
+ },
+ {
+  "name": "video secourses 1280x720 20.0s len362 max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 362,
+   "pipeline": "secourses",
+   "maxSeconds": 15,
+   "refVideos": [
+    {
+     "width": 1280,
+     "height": 720,
+     "duration": 20.0,
+     "hasAudio": true
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 57115,
+   "refVideos": 12574,
+   "usedFrames": 345,
+   "canvas": [
+    448,
+    256
+   ]
+  }
+ },
+ {
+  "name": "video secourses 640x360 3.0s len124 max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "secourses",
+   "maxSeconds": 15,
+   "refVideos": [
+    {
+     "width": 640,
+     "height": 360,
+     "duration": 3.0,
+     "hasAudio": false
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 18459,
+   "refVideos": 3060,
+   "usedFrames": 56,
+   "canvas": [
+    576,
+    320
+   ]
+  }
+ },
+ {
+  "name": "video secourses 1080x1920 15.0s len243 max10",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 243,
+   "pipeline": "secourses",
+   "maxSeconds": 10,
+   "refVideos": [
+    {
+     "width": 1080,
+     "height": 1920,
+     "duration": 15.0,
+     "hasAudio": true
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 42784,
+   "refVideos": 12814,
+   "usedFrames": 226,
+   "canvas": [
+    320,
+    576
+   ]
+  }
+ },
+ {
+  "name": "video core 1920x1080 8.0s len124 max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "core",
+   "maxSeconds": 15,
+   "refVideos": [
+    {
+     "width": 1920,
+     "height": 1080,
+     "duration": 8.0,
+     "hasAudio": true
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 53335,
+   "refVideos": 37936,
+   "usedFrames": 124,
+   "canvas": [
+    1344,
+    768
+   ]
+  }
+ },
+ {
+  "name": "video core 1280x720 20.0s len362 max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 362,
+   "pipeline": "core",
+   "maxSeconds": 15,
+   "refVideos": [
+    {
+     "width": 1280,
+     "height": 720,
+     "duration": 20.0,
+     "hasAudio": true
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 135501,
+   "refVideos": 90960,
+   "usedFrames": 345,
+   "canvas": [
+    1280,
+    704
+   ]
+  }
+ },
+ {
+  "name": "video core 640x360 3.0s len124 max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "core",
+   "maxSeconds": 15,
+   "refVideos": [
+    {
+     "width": 640,
+     "height": 360,
+     "duration": 3.0,
+     "hasAudio": false
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 19139,
+   "refVideos": 3740,
+   "usedFrames": 56,
+   "canvas": [
+    640,
+    352
+   ]
+  }
+ },
+ {
+  "name": "video core 1080x1920 15.0s len243 max10",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 243,
+   "pipeline": "core",
+   "maxSeconds": 10,
+   "refVideos": [
+    {
+     "width": 1080,
+     "height": 1920,
+     "duration": 15.0,
+     "hasAudio": true
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 98306,
+   "refVideos": 68336,
+   "usedFrames": 226,
+   "canvas": [
+    768,
+    1344
+   ]
+  }
+ },
+ {
+  "name": "video secourses trimmed 2-7.5",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "pipeline": "secourses",
+   "maxSeconds": 15,
+   "refVideos": [
+    {
+     "width": 1920,
+     "height": 1080,
+     "duration": 30.0,
+     "hasAudio": true,
+     "trimStart": 2.0,
+     "trimEnd": 7.5
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 28763,
+   "refVideos": 13364
+  }
+ },
+ {
+  "name": "audio 8.0s max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "maxSeconds": 15,
+   "refAudios": [
+    {
+     "duration": 8.0
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 16039,
+   "refAudios": 640
+  }
+ },
+ {
+  "name": "audio 20.0s max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "maxSeconds": 15,
+   "refAudios": [
+    {
+     "duration": 20.0
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 16599,
+   "refAudios": 1200
+  }
+ },
+ {
+  "name": "audio 3.37s max15",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "maxSeconds": 15,
+   "refAudios": [
+    {
+     "duration": 3.37
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 15669,
+   "refAudios": 270
+  }
+ },
+ {
+  "name": "audio 12.0s max5",
+  "spec": {
+   "width": 864,
+   "height": 480,
+   "frames": 124,
+   "maxSeconds": 5,
+   "refAudios": [
+    {
+     "duration": 12.0
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 15799,
+   "refAudios": 400
+  }
+ },
+ {
+  "name": "audio only video soundtrack",
+  "spec": {
+   "width": 32,
+   "height": 32,
+   "frames": 124,
+   "audioOnly": true,
+   "refVideos": [
+    {
+     "width": 1920,
+     "height": 1080,
+     "duration": 8.0,
+     "hasAudio": true
+    }
+   ],
+   "textTokens": 0
+  },
+  "expected": {
+   "nontext": 865,
+   "refAudios": 414
+  }
+ },
+ {
+  "name": "budget",
+  "spec": {
+   "width": 1344,
+   "height": 768,
+   "frames": 360,
+   "textTokens": 0
+  },
+  "expected": {
+   "total": 109062
+  }
+ }
+]

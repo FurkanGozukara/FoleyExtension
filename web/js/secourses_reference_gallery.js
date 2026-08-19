@@ -27,6 +27,7 @@ import {
 } from "./secourses_folder_batch_queue.mjs";
 import { reconcilePortableComboPaths } from "./secourses_portable_combo_paths.mjs";
 import { resolveConfiguredPrompt } from "./secourses_reference_gallery_state.mjs";
+import { GalleryTokenEstimator, TokenMeter } from "./secourses_token_meter.mjs";
 
 const NODE_CLASS = "SECoursesReferenceGallery";
 const AUDIO_RESULT_CLASS = "SECoursesBatchAudioSaveMerge";
@@ -284,6 +285,18 @@ class ReferenceGalleryUI {
             node.setSize([420, node.size[1]]);
         }
         this.refreshLayout();
+        // Live "current / budget" token estimate of the generation this gallery feeds.
+        this.tokenEstimator = new GalleryTokenEstimator(node, this.tokenMeter);
+    }
+
+    dispose() {
+        this.tokenEstimator?.dispose();
+        this.tokenEstimator = null;
+    }
+
+    /** Re-estimates the packed token count shortly (debounced; also fired by graph changes). */
+    scheduleTokenEstimate() {
+        this.tokenEstimator?.schedule();
     }
 
     // ==================== DOM construction ====================
@@ -372,6 +385,7 @@ class ReferenceGalleryUI {
 
         this.continuationRow = document.createElement("div");
         this.continuationRow.className = "secourses-refgal-continuationrow";
+        this.tokenMeter = new TokenMeter("secourses-refgal-tokens");
         this.lastFrameToggle = document.createElement("label");
         this.lastFrameToggle.className = "secourses-refgal-mergetoggle secourses-refgal-continuationtoggle";
         this.lastFrameToggle.title = "After each folder prompt finishes and saves, use only that video's final frame as the next prompt's starting image. Prompts with other references stay on Ref2VA; prompts without references use FL2VA.";
@@ -386,7 +400,7 @@ class ReferenceGalleryUI {
         lastFrameLabel.className = "secourses-refgal-mergelabel";
         lastFrameLabel.textContent = "Continue from last frame";
         this.lastFrameToggle.append(this.lastFrameCheckbox, lastFrameTrack, lastFrameLabel);
-        this.continuationRow.append(this.lastFrameToggle);
+        this.continuationRow.append(this.tokenMeter.element, this.lastFrameToggle);
 
         this.fileInput = document.createElement("input");
         this.fileInput.type = "file";
@@ -584,6 +598,7 @@ class ReferenceGalleryUI {
                 this.batchFolderWidget.callback?.(this.batchFolderWidget.value);
             }
             this.node.setDirtyCanvas(true, true);
+            this.scheduleTokenEstimate();
         });
         this.batchFolderInput.addEventListener("keydown", (event) => {
             if (!(event.ctrlKey || event.metaKey)) event.stopPropagation();
@@ -679,6 +694,7 @@ class ReferenceGalleryUI {
             this.syncPromptToWidget();
             this.renderOverlay();
             this.updateSuggestions();
+            this.scheduleTokenEstimate();
         });
         this.textarea.addEventListener("scroll", () => this.syncOverlayScroll());
         this.textarea.addEventListener("click", () => this.updateSuggestions());
@@ -749,8 +765,9 @@ class ReferenceGalleryUI {
     updateContinuationAvailability() {
         const output = this.node.outputs?.find((item) => item.name === "continue_batch_with_last_frame");
         const available = Boolean(output?.links?.length);
-        this.continuationRow.hidden = !available;
+        this.lastFrameToggle.hidden = !available;
         this.lastFrameCheckbox.disabled = !available;
+        this.scheduleTokenEstimate();
     }
 
     configureFromWidgets() {
@@ -769,6 +786,7 @@ class ReferenceGalleryUI {
         }
         this.hasHydratedPrompt = true;
         this.renderOverlay();
+        this.scheduleTokenEstimate();
     }
 
     saveManifest() {
@@ -1137,6 +1155,7 @@ class ReferenceGalleryUI {
         this.empty.style.display = total ? "none" : "";
         this.renderOverlay();
         this.refreshLayout();
+        this.scheduleTokenEstimate();
     }
 
     buildCard(item) {
@@ -1239,7 +1258,7 @@ class ReferenceGalleryUI {
         const perRow = Math.max(1, Math.floor((width - 12) / 128));
         const rows = total ? Math.ceil(total / perRow) : 0;
         const cardsH = total ? Math.min(rows, 2) * 124 : 30;
-        const continuationH = this.continuationRow.hidden ? 0 : 40;
+        const continuationH = 40;
         return 34 + cardsH + this.trimLoaderHeight() + 116 + 66 + continuationH + 14;
     }
 
@@ -1526,6 +1545,9 @@ app.registerExtension({
         chainCallback(nodeType.prototype, "onConnectionsChange", function () {
             this.__refGallery?.updateMergeAvailability();
             this.__refGallery?.updateContinuationAvailability();
+        });
+        chainCallback(nodeType.prototype, "onRemoved", function () {
+            this.__refGallery?.dispose();
         });
     },
 });
