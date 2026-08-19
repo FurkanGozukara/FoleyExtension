@@ -37,6 +37,20 @@ async function audioDescriptor(file) {
     return { kind: "audio", file, duration: info?.duration ?? null };
 }
 
+/**
+ * Mirrors init_audio_nodes.trim_window + the windowed decode: the seconds actually kept of an
+ * init audio file trimmed to [trim_start, trim_end) (0 / null end = until the end of the file).
+ * Returns null when the length is unknown or the window is invalid (the backend rejects it).
+ */
+export function initAudioTrimmedDuration(duration, trimStart, trimEnd) {
+    const start = Math.max(0, trimStart ?? 0);
+    const end = trimEnd != null && trimEnd > 0 ? trimEnd : null;
+    if (end != null && end <= start) return null; // VALIDATE_INPUTS refuses this window
+    if (duration == null) return end != null ? end - start : null;
+    const stop = end == null ? duration : Math.min(end, duration);
+    return Math.max(0, stop - start);
+}
+
 async function videoDescriptor(file) {
     if (!file) return null;
     const info = await mediaInfo(file);
@@ -214,7 +228,15 @@ export const NODE_EVALUATORS = {
     SECoursesResolutionSync: async (ctx, node, slot) => asNumber(await ctx.input(node, slot === 0 ? "width" : "height")),
     SECoursesBatchDuration: async (ctx, node) => asNumber(await ctx.input(node, "default_duration_seconds")),
     SECoursesInitAudio: async (ctx, node, slot) => {
-        const audio = await audioDescriptor(await ctx.input(node, "audio"));
+        let audio = await audioDescriptor(await ctx.input(node, "audio"));
+        if (audio) {
+            const duration = initAudioTrimmedDuration(
+                audio.duration,
+                asNumber(await ctx.input(node, "trim_start")),
+                asNumber(await ctx.input(node, "trim_end")),
+            );
+            audio = { ...audio, duration };
+        }
         if (slot === 0) return audio;
         const mode = await ctx.input(node, "duration_mode");
         if (audio && (mode == null || mode === "match init audio length")) return audio.duration; // null = unknown

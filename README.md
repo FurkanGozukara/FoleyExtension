@@ -130,7 +130,8 @@ gallery node, its manifest format, and the `@` token grammar stay the same.
 The gallery node's bottom row shows the estimated packed-sequence length of the
 generation it feeds — `Tokens ≈38.1k / 109k (35%) · 864×480 · 124f · 5.2s ·
 reference to video` — and updates as you type, add or remove references, or
-change any connected control (resolution, duration, init image, init audio,
+change any connected control (resolution, duration, init image, init audio and
+its trim window — live while dragging the handles — reference trims,
 reference max seconds, audio-only mode). MiniMax H3 runs full attention over
 one packed sequence, `[text | keyframes / references | audio | video]`, so this
 number is what drives VRAM and speed. Hover the meter for the breakdown.

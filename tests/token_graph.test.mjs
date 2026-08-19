@@ -6,6 +6,7 @@ import {
     PromptResolver,
     estimateFromPrompt,
     evaluateMathExpression,
+    initAudioTrimmedDuration,
     selectMentioned,
     setMediaInfoProvider,
 } from "../web/js/secourses_token_graph.mjs";
@@ -48,12 +49,12 @@ const gallery = (overrides = {}) => ({
 });
 
 /** The Text/Image To Video preset shape: normal route through the I2V subgraph, folder route through the auto adapter. */
-function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAudio = "(none - disabled)", firstFrame = null, faceOn = false } = {}) {
+function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAudio = "(none - disabled)", initAudioTrim = {}, durationMode = "match init audio length", firstFrame = null, faceOn = false } = {}) {
     const output = {
         "119": gallery({ references: refs, batch_folder: batchFolder }),
         "115": { inputs: { aspect_ratio: "16:9 (Widescreen)", megapixels: 0.4, width: 864, height: 480, multiple: 32 }, class_type: "SECoursesResolutionSync" },
         "120": { inputs: { value: duration }, class_type: "PrimitiveFloat" },
-        "187": { inputs: { audio: initAudio, duration_seconds: ["120", 0], duration_mode: "match init audio length" }, class_type: "SECoursesInitAudio" },
+        "187": { inputs: { audio: initAudio, duration_seconds: ["120", 0], duration_mode: durationMode, ...initAudioTrim }, class_type: "SECoursesInitAudio" },
         "143": { inputs: { references: ["119", 0], default_duration_seconds: ["187", 1] }, class_type: "SECoursesBatchDuration" },
         // "Image to Video (MiniMax H3)" subgraph, flattened
         "105:107": { inputs: { expression: LENGTH_GRID, "values.a": ["143", 0] }, class_type: "ComfyMathExpression" },
@@ -150,6 +151,40 @@ test("init audio: video length follows the audio and the whole soundtrack is a t
     const est = result.estimate;
     assert.equal(est.frames, H3.framesForSeconds(9.0));
     assert.equal(est.parts.keyframes, est.audioT * 2);
+});
+
+test("init audio trim window drives the video length in match mode", () => {
+    assert.equal(initAudioTrimmedDuration(9.0, null, null), 9.0);
+    assert.equal(initAudioTrimmedDuration(9.0, 2.0, 5.5), 3.5);
+    assert.equal(initAudioTrimmedDuration(9.0, 3.0, 0), 6.0); // 0 end = until the end of the file
+    assert.equal(initAudioTrimmedDuration(9.0, 2.0, 30.0), 7.0); // end beyond EOF is capped like the decoder
+    assert.equal(initAudioTrimmedDuration(9.0, 12.0, null), 0); // start past EOF decodes nothing
+    assert.equal(initAudioTrimmedDuration(null, 2.0, 5.5), 3.5); // unknown file length, exact window
+    assert.equal(initAudioTrimmedDuration(null, 2.0, null), null); // unknown length, open end
+    assert.equal(initAudioTrimmedDuration(9.0, 5.0, 2.0), null); // inverted window is rejected by the backend
+});
+
+test("init audio trim: frames follow the trimmed window, keep-duration mode ignores it", async () => {
+    const trimmed = await estimateFromPrompt(
+        textToVideoPrompt({ duration: 5, initAudio: "song.mp3", initAudioTrim: { trim_start: 2.0, trim_end: 5.5 } }), 119);
+    assert.ok(trimmed.estimate, trimmed.reason);
+    assert.equal(trimmed.estimate.frames, H3.framesForSeconds(3.5));
+    assert.equal(trimmed.estimate.parts.keyframes, trimmed.estimate.audioT * 2);
+    assert.equal(trimmed.estimate.approximate, false);
+
+    const openEnd = await estimateFromPrompt(
+        textToVideoPrompt({ duration: 5, initAudio: "song.mp3", initAudioTrim: { trim_start: 3.0, trim_end: 0 } }), 119);
+    assert.equal(openEnd.estimate.frames, H3.framesForSeconds(6.0));
+
+    const keep = await estimateFromPrompt(
+        textToVideoPrompt({ duration: 5, initAudio: "song.mp3", initAudioTrim: { trim_start: 2.0, trim_end: 5.5 }, durationMode: "keep workflow duration" }), 119);
+    assert.equal(keep.estimate.frames, H3.framesForSeconds(5.0));
+    assert.equal(keep.estimate.parts.keyframes, keep.estimate.audioT * 2); // the guide still covers the target length
+
+    const inverted = await estimateFromPrompt(
+        textToVideoPrompt({ duration: 5, initAudio: "song.mp3", initAudioTrim: { trim_start: 5.0, trim_end: 2.0 } }), 119);
+    assert.ok(inverted.estimate); // unresolvable duration falls back to the defaults, flagged approximate
+    assert.equal(inverted.estimate.approximate, true);
 });
 
 test("first frame adds one keyframe block", async () => {

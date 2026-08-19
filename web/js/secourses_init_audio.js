@@ -123,6 +123,25 @@ function hideValueWidget(widget) {
     widget.computeSize = () => [0, -4];
 }
 
+/**
+ * Nudge every reference gallery's live token meter: the init audio selection and its trim
+ * window drive the video duration (and the audio-guide tokens), so the estimate must follow
+ * immediately instead of waiting for the next canvas interaction.
+ */
+function scheduleTokenEstimates(node) {
+    const stack = [node?.graph, app.graph];
+    const seen = new Set();
+    while (stack.length) {
+        const graph = stack.pop();
+        if (!graph || seen.has(graph)) continue;
+        seen.add(graph);
+        for (const other of graph._nodes ?? []) {
+            other.__refGallery?.scheduleTokenEstimate?.();
+            if (other.subgraph) stack.push(other.subgraph);
+        }
+    }
+}
+
 // ==================== Upload (audio or video) ====================
 
 async function uploadInitMedia(node, file) {
@@ -633,14 +652,15 @@ class InitAudioTrimPanel {
         const round = (value) => Math.round(value * 100) / 100;
         const next = { start: round(Math.max(0, start || 0)), end: end == null ? 0 : round(Math.max(0, end)) };
         const apply = (widget, value) => {
-            if (!widget || widget.value === value) return;
+            if (!widget || widget.value === value) return false;
             const previous = widget.value;
             widget.value = value;
             widget.callback?.(value, app.canvas, this.node);
             this.node.onWidgetChanged?.(widget.name, value, previous, widget);
+            return true;
         };
-        apply(this.startWidget, next.start);
-        apply(this.endWidget, next.end);
+        const changed = [apply(this.startWidget, next.start), apply(this.endWidget, next.end)].some(Boolean);
+        if (changed) scheduleTokenEstimates(this.node);
         this.node.graph?.setDirtyCanvas(true, true);
     }
 
@@ -792,21 +812,25 @@ function installInitAudioUi(node) {
         if (value === NO_AUDIO) {
             clearDisabledPlayer(node);
             panel.setFile(null);
+            scheduleTokenEstimates(node);
             node.setDirtyCanvas?.(true, true);
             return;
         }
         const result = originalCallback?.apply(this, arguments);
         // A different file gets a fresh (whole-file) window; re-picking the same file keeps its trim.
         panel.setFile(value, { resetTrim: value !== panel.file });
+        scheduleTokenEstimates(node);
         return result;
     };
-    for (const name of ["trim_start", "trim_end"]) {
+    for (const name of ["trim_start", "trim_end", "duration_mode", "duration_seconds"]) {
         const widget = findWidget(node, name);
         if (!widget) continue;
+        const isTrim = name.startsWith("trim_");
         const original = widget.callback;
         widget.callback = function () {
             const result = original?.apply(this, arguments);
-            panel.updateUI();
+            if (isTrim) panel.updateUI();
+            scheduleTokenEstimates(node);
             return result;
         };
     }
