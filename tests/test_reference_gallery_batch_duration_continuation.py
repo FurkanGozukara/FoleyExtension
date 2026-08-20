@@ -111,6 +111,69 @@ class BatchContinuationTests(unittest.TestCase):
             ({"image": None},),
         )
 
+    def test_normal_run_passes_the_init_image_through(self):
+        init = object()
+        node = gallery.SECoursesBatchContinuationFrame()
+        self.assertEqual(
+            node.load({"prompt": "normal"}, False, init_image=init),
+            ({"image": init},),
+        )
+        self.assertEqual(
+            node.load({"prompt": "normal"}, True, init_image=init),
+            ({"image": init},),
+        )
+        self.assertEqual(node.load({"prompt": "normal"}, False), ({"image": None},))
+
+    def test_batch_items_ignore_the_init_image(self):
+        init = object()
+        node = gallery.SECoursesBatchContinuationFrame()
+        self.assertEqual(
+            node.load(sequential_pack(1), True, init_image=init),
+            ({"image": None},),
+        )
+        self.assertEqual(
+            node.load(sequential_pack(2), False, init_image=init),
+            ({"image": None},),
+        )
+
+    def test_batch_continuation_frame_wins_over_the_init_image(self):
+        first = sequential_pack(1, count=2)
+        second = sequential_pack(2, count=2)
+        gallery._record_batch_video_for_continuation(first, "first.mp4", True)
+        expected = object()
+        with mock.patch.object(gallery, "_decode_last_video_frame", return_value=expected):
+            result = gallery.SECoursesBatchContinuationFrame().load(
+                second, True, init_image=object()
+            )
+        self.assertEqual(result, ({"image": expected},))
+
+
+class ReferenceModeRoutingTests(unittest.TestCase):
+    def detect(self, pack):
+        return gallery.SECoursesMiniMaxH3ReferenceMode().detect(pack)
+
+    def test_normal_pack_without_media_routes_to_the_normal_path(self):
+        self.assertEqual(
+            self.detect({"prompt": "text", "images": [], "videos": [], "audios": []}),
+            (False, False),
+        )
+
+    def test_normal_pack_with_media_routes_to_the_auto_path(self):
+        self.assertEqual(
+            self.detect({"prompt": "p", "images": [{"file": "a.png"}], "videos": [], "audios": []}),
+            (True, True),
+        )
+        self.assertEqual(
+            self.detect({"prompt": "p", "images": [], "videos": [], "audios": [{"file": "a.mp3"}]}),
+            (True, True),
+        )
+
+    def test_batch_items_always_route_to_the_auto_path(self):
+        self.assertEqual(self.detect(sequential_pack(1)), (False, True))
+        with_media = sequential_pack(2)
+        with_media["images"] = [{"file": "a.png"}]
+        self.assertEqual(self.detect(with_media), (True, True))
+
 
 class MiniMaxAutoRoutingTests(unittest.TestCase):
     def test_text_only_pack_uses_fl2va_and_passes_continuation_frame(self):

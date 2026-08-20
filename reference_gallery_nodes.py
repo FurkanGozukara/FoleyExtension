@@ -2128,7 +2128,16 @@ class SECoursesBatchContinuationFrame:
                     "forceInput": True,
                     "tooltip": "Connect the gallery's last-frame continuation output.",
                 }),
-            }
+            },
+            "optional": {
+                "init_image": ("IMAGE", {
+                    "tooltip": "Optional starting image for normal (non folder-batch) runs, passed through as "
+                               "first_frame so one Auto adapter covers init image generation too. FL2VA uses it "
+                               "as the exact first frame; Ref2VA adds it as the starting-frame picture reference. "
+                               "Folder-batch items ignore it: they use same-basename init images and the "
+                               "last-frame continuation instead.",
+                }),
+            },
         }
 
     CATEGORY = "SECourses/video"
@@ -2137,12 +2146,17 @@ class SECoursesBatchContinuationFrame:
     FUNCTION = "load"
     DESCRIPTION = (
         "Returns no image for the first folder prompt, then decodes only the final frame of each immediately "
-        "preceding saved video for use as the next MiniMax H3 starting image."
+        "preceding saved video for use as the next MiniMax H3 starting image. For normal (non folder-batch) "
+        "runs the optional init_image input is passed through instead, so the same preset offers an optional "
+        "starting image."
     )
 
-    def load(self, references, continue_batch_with_last_frame):
+    def load(self, references, continue_batch_with_last_frame, init_image=None):
         path = _previous_batch_video(references, bool(continue_batch_with_last_frame))
         if path is None:
+            if init_image is not None and not (isinstance(references, dict) and references.get("batch")):
+                print("[SECoursesBatchContinuationFrame] using the connected init image", flush=True)
+                return ({"image": init_image},)
             # A literal None output is treated as an unavailable dependency by
             # ComfyUI's graph executor. Keep the optional value concrete so the
             # first batch item can continue through the Auto adapter normally.
@@ -2740,15 +2754,26 @@ class SECoursesMiniMaxH3ReferenceMode:
         }
 
     CATEGORY = "SECourses/references"
-    RETURN_TYPES = ("BOOLEAN",)
-    RETURN_NAMES = ("has_references",)
+    RETURN_TYPES = ("BOOLEAN", "BOOLEAN")
+    RETURN_NAMES = ("has_references", "auto_route")
+    OUTPUT_TOOLTIPS = (
+        "True when the current prompt pack has media references (per item in folder batches). Drives the "
+        "FL2VA / Ref2VA checkpoint switch.",
+        "True when the current run should go through the Auto FL2VA/Ref2VA pipeline: references exist or this "
+        "is a folder-batch item. Drives a preset's normal-vs-auto route switch.",
+    )
     FUNCTION = "detect"
-    DESCRIPTION = "Selects MiniMax H3 Ref2VA only when the current prompt actually has media references."
+    DESCRIPTION = (
+        "Selects MiniMax H3 Ref2VA only when the current prompt actually has media references. The auto_route "
+        "output is additionally true for every folder-batch item, so presets can route single runs with "
+        "references and all folder batches through the same Auto adapter pipeline."
+    )
 
     def detect(self, references):
         if not isinstance(references, dict):
             raise ValueError("The references input must come from a SECourses Reference Gallery node.")
-        return (any(references.get(kind) for kind in ("images", "videos", "audios")),)
+        has_references = any(references.get(kind) for kind in ("images", "videos", "audios"))
+        return (has_references, has_references or bool(references.get("batch")))
 
 
 class SECoursesMiniMaxH3TextOnly:

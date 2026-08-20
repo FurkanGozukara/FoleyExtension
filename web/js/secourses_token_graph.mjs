@@ -274,7 +274,13 @@ export const NODE_EVALUATORS = {
     LoadImage: async (ctx, node, slot) => (slot === 0 ? imageDescriptor(await ctx.input(node, "image")) : undefined),
     SECoursesLoadImage: async (ctx, node, slot) => (slot === 0 ? imageDescriptor(await ctx.input(node, "image")) : undefined),
     SECoursesOptionalImage: async (ctx, node) => imageDescriptor(await ctx.input(node, "image")),
-    SECoursesBatchContinuationFrame: async () => null,
+    SECoursesBatchContinuationFrame: async (ctx, node) => {
+        // Folder-batch continuation frames are unknowable ahead of time; normal runs
+        // pass the optional init image through as the Auto adapter's starting frame.
+        const pack = await ctx.input(node, "references");
+        if (pack?.batchActive) return null;
+        return (await ctx.input(node, "init_image")) ?? null;
+    },
     LoadAudio: async (ctx, node) => audioDescriptor(await ctx.input(node, "audio")),
     SECoursesTrimAudio: async (ctx, node) => {
         const audio = await ctx.input(node, "audio");
@@ -295,9 +301,12 @@ export const NODE_EVALUATORS = {
         if (!image) return null;
         return slot === 0 ? image.width : slot === 1 ? image.height : 1;
     },
-    SECoursesMiniMaxH3ReferenceMode: async (ctx, node) => {
+    SECoursesMiniMaxH3ReferenceMode: async (ctx, node, slot) => {
         const pack = await ctx.input(node, "references");
-        return pack ? pack.images.length + pack.videos.length + pack.audios.length > 0 : undefined;
+        if (!pack) return undefined;
+        const hasRefs = pack.images.length + pack.videos.length + pack.audios.length > 0;
+        // slot 0 = has_references, slot 1 = auto_route (references or folder-batch item)
+        return slot === 1 ? hasRefs || pack.batchActive === true : hasRefs;
     },
     [GALLERY_CLASS]: async (ctx, node, slot) => {
         const manifest = parseManifest(await ctx.input(node, "references"));

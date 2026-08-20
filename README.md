@@ -98,7 +98,10 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
 - **MiniMax H3 Reference Mode** and **MiniMax H3 Text Only (Gallery Prompt)**
   let one workflow choose the task-specific checkpoint lazily: FL2VA when the
   current prompt has no media and Ref2VA when it does. This also works per item
-  in recursive folder batches.
+  in recursive folder batches. Reference Mode's second output, `auto_route`, is
+  additionally true for every folder-batch item, so the video presets use it to
+  send both single runs with references and all folder batches through the same
+  Auto FL2VA/Ref2VA pipeline while plain single prompts keep the normal path.
 - **MiniMax H3 Auto (Gallery)** combines those paths for video presets. Its
   mode output is diagnostic; **MiniMax H3 Reference Mode** selects the
   checkpoint before model-dependent VAE optimization. Auto applies a
@@ -107,7 +110,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
 - **MiniMax H3 Batch Duration** resolves the per-item filename suffix while
   preserving the user-set duration for normal prompts and unmatched names.
 - **MiniMax H3 Previous Batch Final Frame** validates strict sequential order
-  and loads the saved frame used by the optional continuation path.
+  and loads the saved frame used by the optional continuation path. Its
+  optional `init_image` input passes a user-selected starting image through on
+  normal (non folder-batch) runs, so one preset also offers an optional init
+  image: FL2VA uses it as the exact first frame, Ref2VA adds it as the
+  starting-frame picture reference. Folder-batch items ignore it and keep
+  using same-basename init images and last-frame continuation.
 
 - **Save + Merge MiniMax H3 Folder Batch Videos** is the video presets' single
   result node. It saves the current individual MP4 before the next queued prompt

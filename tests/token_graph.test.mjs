@@ -48,8 +48,13 @@ const gallery = (overrides = {}) => ({
     class_type: "SECoursesReferenceGallery",
 });
 
-/** The Text/Image To Video preset shape: normal route through the I2V subgraph, folder route through the auto adapter. */
-function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAudio = "(none - disabled)", initAudioTrim = {}, durationMode = "match init audio length", firstFrame = null, faceOn = false } = {}) {
+/**
+ * The Text/Image To Video preset shape: normal route through the I2V subgraph, folder route through the
+ * auto adapter. `router: "auto"` is the current preset shape (the switch follows Reference Mode's
+ * auto_route output, so single runs with references use the auto adapter too); the default `"legacy"`
+ * shape switches on the gallery's folder_batch_active output only.
+ */
+function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAudio = "(none - disabled)", initAudioTrim = {}, durationMode = "match init audio length", firstFrame = null, faceOn = false, router = "legacy", initImage = null } = {}) {
     const output = {
         "119": gallery({ references: refs, batch_folder: batchFolder }),
         "115": { inputs: { aspect_ratio: "16:9 (Widescreen)", megapixels: 0.4, width: 864, height: 480, multiple: 32 }, class_type: "SECoursesResolutionSync" },
@@ -67,14 +72,14 @@ function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAu
         // "Folder Batch Auto" subgraph, flattened
         "121:136": { inputs: { expression: LENGTH_GRID, "values.a": ["143", 0] }, class_type: "ComfyMathExpression" },
         "121:135": { inputs: { clip: ["121:132", 0], vae: ["121:123", 0], audio_vae: ["121:124", 0], references: ["119", 0], continuation_frame: ["144", 0], width: ["115", 0], height: ["115", 1], length: ["121:136", 1], ref_image_size: "match" }, class_type: "SECoursesMiniMaxH3Auto" },
-        "144": { inputs: { references: ["119", 0], continue_batch_with_last_frame: ["119", 4] }, class_type: "SECoursesBatchContinuationFrame" },
+        "144": { inputs: { references: ["119", 0], continue_batch_with_last_frame: ["119", 4], ...(initImage ? { init_image: ["114", 0] } : {}) }, class_type: "SECoursesBatchContinuationFrame" },
         "121:185": { inputs: { positive: ["121:135", 0], latent: ["121:135", 1], audio_vae: ["121:124", 0], init_audio: ["187", 0], audio_conditioning: "lock soundtrack + guide", references: ["119", 0] }, class_type: "SECoursesMiniMaxH3InitAudio" },
         "121:130": { inputs: { model: ["121:131", 0], conditioning: ["121:185", 0] }, class_type: "BasicGuider" },
         "121:129": { inputs: { noise: ["121:133", 0], guider: ["121:130", 0], sampler: ["121:127", 0], sigmas: ["121:128", 0], latent_image: ["121:185", 1] }, class_type: "SamplerCustomAdvanced" },
         "121:126": { inputs: { samples: ["121:129", 0], vae: ["121:123", 0] }, class_type: "VAEDecode" },
         "121:134": { inputs: { images: ["121:126", 0], fps: 24 }, class_type: "CreateVideo" },
         // router + face pass + save
-        "122": { inputs: { switch: ["119", 2], on_false: ["105:91", 0], on_true: ["121:134", 0] }, class_type: "ComfySwitchNode" },
+        "122": { inputs: { switch: router === "auto" ? ["148", 1] : ["119", 2], on_false: ["105:91", 0], on_true: ["121:134", 0] }, class_type: "ComfySwitchNode" },
         "153": { inputs: { value: faceOn }, class_type: "PrimitiveBoolean" },
         "154:3": { inputs: { clip: ["105:13", 0], vae: ["105:11", 0], audio_vae: ["105:24", 0], references: ["119", 0], prompt_override: ["119", 1], width: ["154:1", 4], height: ["154:1", 5], length: ["105:107", 1], ref_image_size: "match" }, class_type: "SECoursesMiniMaxH3Auto" },
         "154:1": { inputs: { images: ["105:10", 0], detector: "yolo.pt" }, class_type: "MiniMaxH3FaceTrackCrop" },
@@ -84,6 +89,8 @@ function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAu
         "92": { inputs: { video: ["163", 0], references: ["119", 0], continue_batch_with_last_frame: ["119", 4], merge_batch_videos: ["119", 3], filename_prefix: "video/MiniMax_H3" }, class_type: "SECoursesBatchVideoSaveMerge" },
     };
     if (firstFrame) output["114"] = { inputs: { image: firstFrame }, class_type: "SECoursesLoadImage" };
+    if (initImage) output["114"] = { inputs: { image: initImage }, class_type: "SECoursesLoadImage" };
+    if (router === "auto") output["148"] = { inputs: { references: ["119", 0] }, class_type: "SECoursesMiniMaxH3ReferenceMode" };
     return output;
 }
 
@@ -111,7 +118,7 @@ test("roster rule: everything within the cap, only mentions above it", () => {
     assert.equal(selectMentioned("nothing", entries, 9, "image").length, 0);
 });
 
-test("normal route of the Text To Video preset: I2V subgraph, references ignored, prompt from the gallery", async () => {
+test("legacy preset shape: normal route ignores references, prompt from the gallery", async () => {
     const refs = JSON.stringify({ images: [{ file: "reference_gallery/a.png [input]", name: "a.png" }], videos: [], audios: [] });
     const result = await estimateFromPrompt(textToVideoPrompt({ duration: 5, refs }), 119);
     assert.ok(result.estimate, result.reason);
@@ -135,6 +142,54 @@ test("folder route: the auto adapter attaches the gallery references", async () 
     const expectedRef = H3.estimate({ width: 864, height: 480, frames: 124, refImages: [{ width: 1920, height: 1080 }], pipeline: "secourses" }).parts.refImages;
     assert.equal(result.estimate.parts.refImages, expectedRef);
     assert.equal(result.label, "reference to video");
+});
+
+test("auto-routed preset shape: single runs with references take the auto adapter", async () => {
+    const refs = JSON.stringify({ images: [{ file: "reference_gallery/a.png [input]", name: "a.png" }], videos: [], audios: [] });
+    const result = await estimateFromPrompt(textToVideoPrompt({ duration: 5, refs, router: "auto" }), 119);
+    assert.ok(result.estimate, result.reason);
+    const expectedRef = H3.estimate({ width: 864, height: 480, frames: 124, refImages: [{ width: 1920, height: 1080 }], pipeline: "secourses" }).parts.refImages;
+    assert.equal(result.estimate.parts.refImages, expectedRef);
+    assert.equal(result.estimate.approximate, false);
+    assert.equal(result.label, "reference to video");
+});
+
+test("auto-routed preset shape: no references and no batch keeps the normal route", async () => {
+    const result = await estimateFromPrompt(textToVideoPrompt({ duration: 5, router: "auto" }), 119);
+    assert.ok(result.estimate, result.reason);
+    assert.equal(result.estimate.parts.refImages, 0);
+    assert.equal(result.estimate.approximate, false);
+    assert.equal(result.label, "text to video");
+});
+
+test("auto-routed preset shape: a folder batch without references still takes the auto adapter", async () => {
+    const result = await estimateFromPrompt(textToVideoPrompt({ duration: 5, batchFolder: "D:/prompts", router: "auto" }), 119);
+    assert.ok(result.estimate, result.reason);
+    assert.equal(result.label, "text to video");
+    assert.equal(result.estimate.parts.refImages, 0);
+});
+
+test("init image passes through the continuation node on the auto route", async () => {
+    const refs = JSON.stringify({ images: [{ file: "reference_gallery/a.png [input]", name: "a.png" }], videos: [], audios: [] });
+    const result = await estimateFromPrompt(textToVideoPrompt({ duration: 5, refs, router: "auto", initImage: "start.jpg" }), 119);
+    assert.ok(result.estimate, result.reason);
+    const expectedRef = H3.estimate({
+        width: 864, height: 480, frames: 124,
+        refImages: [{ width: 1920, height: 1080 }, { width: 864, height: 480 }],
+        pipeline: "secourses",
+    }).parts.refImages;
+    assert.equal(result.estimate.parts.refImages, expectedRef, "the init image is counted as the starting-frame picture reference");
+    assert.equal(result.label, "reference to video");
+});
+
+test("init image without references stays a keyframe on the auto route", async () => {
+    const result = await estimateFromPrompt(textToVideoPrompt({ duration: 5, router: "auto", initImage: "start.jpg", refs: JSON.stringify({ images: [{ file: "reference_gallery/a.png [input]", name: "a.png" }] }) }), 119);
+    assert.ok(result.estimate, result.reason);
+    // With a reference attached the auto route runs; remove it and the normal route runs instead:
+    const plain = await estimateFromPrompt(textToVideoPrompt({ duration: 5, router: "auto", initImage: "start.jpg" }), 119);
+    assert.ok(plain.estimate, plain.reason);
+    assert.equal(plain.label, "text to video");
+    assert.equal(plain.estimate.parts.keyframes, 0, "the normal route does not read the continuation node");
 });
 
 test("duration follows the primitive through the batch-duration helper and the length grid", async () => {
