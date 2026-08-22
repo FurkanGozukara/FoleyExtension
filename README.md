@@ -224,3 +224,22 @@ Low-memory streaming helpers for the LTX 2.3 Foley video-to-audio workflow:
 frame streaming with the 8n+1 cap, overlapping window planning/selection for
 long videos, and audio muxing onto the original compressed video. See
 `THIRD_PARTY_NOTICES.md` for upstream attribution.
+
+## LTX 2.5 preset support
+
+The maintained LTX 2.5 pixel spatial upscaler presets use four lightweight
+helpers included in this default-installed extension:
+
+- **LTX-2.5 Upscale Controls** exposes token-budget, chunk-length, overlap, and
+  sampling controls on the main workflow canvas.
+- **LTX-2.5 Distilled Sigma Schedule** returns the official eight-step
+  distilled curve by default. Other step counts interpolate that curve and are
+  experimental.
+- **LTX-2.5 Prepare Video Chunks** edge-pads input frames to valid model
+  geometry, calculates an exact 2x output crop, and creates overlapping
+  `8n+1`-frame chunks under the selected token budget.
+- **LTX-2.5 Merge Video Chunks** removes padded frames, blends overlaps, and
+  restores the source frame count.
+
+These nodes manage workflow geometry and memory. They do not turn the
+generative pixel spatial upscaler into a deterministic restoration filter.
