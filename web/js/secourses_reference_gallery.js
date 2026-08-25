@@ -276,6 +276,7 @@ class ReferenceGalleryUI {
         const ui = this;
         this.widget = node.addDOMWidget("gallery_ui", "secourses_gallery", this.root, {
             hideOnZoom: false,
+            selectOn: [],
             getValue: () => ui.manifestWidget?.value ?? "{}",
             setValue: () => {},
         });
