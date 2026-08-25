@@ -51,6 +51,7 @@ except ImportError:  # direct test-module import
 
 REF_PACK_TYPE = "SECOURSES_REF_PACK"
 OPTIONAL_IMAGE_TYPE = "SECOURSES_OPTIONAL_IMAGE"
+INIT_VIDEO_TYPE = "SECOURSES_INIT_VIDEO"
 
 CANVAS_MULTIPLE = 32
 RGB_FLOAT_BYTES_PER_PIXEL = 3 * 4
@@ -1031,6 +1032,104 @@ def _merge_saved_video_group(group):
     }
 
 
+def _ffmpeg_number(value):
+    return format(float(value), ".12g")
+
+
+def _normalized_audio_filter(input_label, duration, output_label):
+    duration_text = _ffmpeg_number(duration)
+    return (
+        f"{input_label}aresample=48000:async=1:first_pts=0,"
+        "aformat=sample_fmts=fltp:sample_rates=48000:channel_layouts=stereo,"
+        f"apad=whole_dur={duration_text},atrim=duration={duration_text},"
+        f"asetpts=N/SR/TB[{output_label}]"
+    )
+
+
+def _silence_filter(duration, output_label):
+    return (
+        "anullsrc=channel_layout=stereo:sample_rate=48000,"
+        f"atrim=duration={_ffmpeg_number(duration)},asetpts=N/SR/TB[{output_label}]"
+    )
+
+
+def _merge_init_video_with_generated(source_path, generated_path, filename_prefix):
+    """Append a saved generated segment to an arbitrary init video with FFmpeg."""
+    import subprocess
+
+    import folder_paths
+    from imageio_ffmpeg import get_ffmpeg_exe
+
+    source_info = _media_info(str(source_path))
+    generated_info = _media_info(str(generated_path))
+    if source_info.get("kind") != "video" or generated_info.get("kind") != "video":
+        raise ValueError("Init-video merging requires two decodable video streams.")
+
+    width = int(generated_info.get("width") or 0)
+    height = int(generated_info.get("height") or 0)
+    fps = float(generated_info.get("fps") or 24.0)
+    source_duration = float(source_info.get("duration") or 0.0)
+    generated_duration = float(generated_info.get("duration") or 0.0)
+    if width <= 0 or height <= 0 or fps <= 0 or source_duration <= 0 or generated_duration <= 0:
+        raise ValueError("Could not determine the init or generated video's dimensions, FPS, and duration.")
+
+    encoded_width = width + width % 2
+    encoded_height = height + height % 2
+    pad_filter = ""
+    if encoded_width != width or encoded_height != height:
+        pad_filter = f",pad={encoded_width}:{encoded_height}:0:0:black"
+
+    prefix = f"{str(filename_prefix or 'video/MiniMax_H3')}_Merged"
+    full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
+        prefix,
+        folder_paths.get_output_directory(),
+        encoded_width,
+        encoded_height,
+    )
+    output_name = f"{filename}_{counter:05}_.mp4"
+    output_path = Path(full_output_folder) / output_name
+
+    fps_text = _ffmpeg_number(fps)
+    source_duration_text = _ffmpeg_number(source_duration)
+    generated_duration_text = _ffmpeg_number(generated_duration)
+    filters = [
+        f"[0:v:0]scale={width}:{height}:flags=lanczos,format=pix_fmts=rgb24,"
+        f"framerate=fps={fps_text}:interp_start=0:interp_end=255:scene=100,setsar=1{pad_filter},"
+        f"tpad=stop_mode=clone:stop_duration={source_duration_text},"
+        f"trim=duration={source_duration_text},setpts=PTS-STARTPTS[srcv]",
+        f"[1:v:0]scale={width}:{height}:flags=lanczos,format=pix_fmts=rgb24,"
+        f"framerate=fps={fps_text}:interp_start=0:interp_end=255:scene=100,setsar=1{pad_filter},"
+        f"trim=duration={generated_duration_text},setpts=PTS-STARTPTS[genv]",
+        "[srcv][genv]concat=n=2:v=1:a=0[v]",
+        _normalized_audio_filter("[0:a:0]", source_duration, "srca")
+        if source_info.get("has_audio") else _silence_filter(source_duration, "srca"),
+        _normalized_audio_filter("[1:a:0]", generated_duration, "gena")
+        if generated_info.get("has_audio") else _silence_filter(generated_duration, "gena"),
+        "[srca][gena]concat=n=2:v=0:a=1[a]",
+    ]
+    command = [
+        get_ffmpeg_exe(), "-hide_banner", "-loglevel", "error", "-y",
+        "-i", str(source_path), "-i", str(generated_path),
+        "-filter_complex", ";".join(filters), "-map", "[v]", "-map", "[a]",
+        "-c:v", "libx264", "-pix_fmt", "yuv420p", "-crf", "18",
+        "-c:a", "aac", "-b:a", "192k", "-r", fps_text,
+        "-t", _ffmpeg_number(source_duration + generated_duration),
+        "-movflags", "+faststart", str(output_path),
+    ]
+    result = subprocess.run(command, check=False, capture_output=True, text=True)
+    if result.returncode != 0:
+        detail = result.stderr.strip() or "unknown FFmpeg error"
+        raise RuntimeError(f"Init video merge failed: {detail}")
+
+    return {
+        "filename": output_name,
+        "subfolder": subfolder,
+        "type": "output",
+        "format": "video/mp4",
+        "fullpath": str(output_path),
+    }
+
+
 def _video_from_saved_output(saved):
     from comfy_api.latest import InputImpl
 
@@ -1068,7 +1167,7 @@ def _decode_last_video_frames(path, frame_count):
     sought = False
     with av.open(path, mode="r") as container:
         if not container.streams.video:
-            raise ValueError(f"Previous folder-batch output has no video stream: {path}")
+            raise ValueError(f"Selected video has no decodable video stream: {path}")
         stream = container.streams.video[0]
         if stream.duration is not None and stream.time_base is not None:
             try:
@@ -1085,11 +1184,11 @@ def _decode_last_video_frames(path, frame_count):
     if len(frames) < requested and sought:
         with av.open(path, mode="r") as container:
             if not container.streams.video:
-                raise ValueError(f"Previous folder-batch output has no video stream: {path}")
+                raise ValueError(f"Selected video has no decodable video stream: {path}")
             frames = decode(container, container.streams.video[0])
     if len(frames) < requested:
         raise ValueError(
-            f"Previous folder-batch output has {len(frames)} decodable video frame(s), "
+            f"Selected video has {len(frames)} decodable video frame(s), "
             f"but {requested} context frames were requested: {path}"
         )
 
@@ -1100,6 +1199,15 @@ def _decode_last_video_frames(path, frame_count):
 
 def _decode_last_video_frame(path):
     return _decode_last_video_frames(path, 1)
+
+
+def _init_video_path(value):
+    if not isinstance(value, dict) or not value.get("path"):
+        return None
+    path = os.path.abspath(os.fspath(value["path"]))
+    if not os.path.isfile(path):
+        raise FileNotFoundError(f"Init video was not found: {path}")
+    return path
 
 
 def _continuation_frames_to_trim(pack, enabled, frame_count):
@@ -1114,7 +1222,7 @@ def _continuation_frames_to_trim(pack, enabled, frame_count):
     return requested
 
 
-def _trim_video_start(video, frame_count):
+def _trim_video_start(video, frame_count, trim_audio=True):
     from comfy_api.latest import Input, InputImpl, Types
 
     trim_frames = int(frame_count)
@@ -1130,7 +1238,7 @@ def _trim_video_start(video, frame_count):
         )
 
     audio = components.audio
-    if audio is not None and isinstance(audio, dict):
+    if trim_audio and audio is not None and isinstance(audio, dict):
         waveform = audio.get("waveform")
         sample_rate = int(audio.get("sample_rate", 0) or 0)
         fps = float(components.frame_rate)
@@ -1940,11 +2048,11 @@ class SECoursesReferenceGallery:
                 }),
                 "merge_batch_videos": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "When Folder batch is active, save each queued prompt before starting the next, then concatenate each prompt directory after the final job. The complete last merge is returned.",
+                    "tooltip": "With an init video, append the newly generated frames to it. With Folder batch, save each queued prompt before starting the next, then concatenate each prompt directory after the final job.",
                 }),
                 "continue_batch_with_last_frame": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "When Folder batch is active, continue each prompt from the selected final video-frame context of the preceding completed video. The first prompt uses no continuation frames.",
+                    "tooltip": "Use the selected final frame context from an uploaded init video, or from the preceding completed video in Folder batch. The first folder prompt uses no continuation frames.",
                 }),
                 "continuation_context_frames": ([str(value) for value in CONTINUATION_CONTEXT_FRAMES], {
                     "default": "1",
@@ -1975,8 +2083,8 @@ class SECoursesReferenceGallery:
         "Every gallery reference bundled in upload order, ready for a model adapter node such as 'MiniMax H3 References (Gallery)'.",
         "The prompt exactly as typed, or one output per naturally ordered .txt file when Folder batch is active.",
         "True for folder-batch items and false for the normal single prompt.",
-        "True for every sequential folder job when the adjacent merge toggle is enabled.",
-        "True for every sequential folder job when video-frame continuation is enabled.",
+        "True when init-video or folder-batch merging is enabled.",
+        "True when init-video or folder-batch video-frame continuation is enabled.",
         "Selected continuation context length: 1, 5, 22, 39, or 56 video frames.",
     )
     FUNCTION = "collect"
@@ -2070,7 +2178,10 @@ class SECoursesReferenceGallery:
             (("image(s)", pack["images"]), ("video(s)", pack["videos"]), ("audio", pack["audios"]))
         )
         print(f"[SECoursesReferenceGallery] prepared {summary} for target-aware decoding", flush=True)
-        return ([pack], [prompt], [False], [False], [False], [context_frames])
+        return (
+            [pack], [prompt], [False], [bool(merge_batch_videos)],
+            [bool(continue_batch_with_last_frame)], [context_frames],
+        )
 
     @classmethod
     def IS_CHANGED(
@@ -2251,6 +2362,10 @@ class SECoursesBatchContinuationFrame:
                                "Folder-batch items ignore it: they use same-basename init images and the "
                                "last-frame continuation instead.",
                 }),
+                "init_video": (INIT_VIDEO_TYPE, {
+                    "tooltip": "Optional source from Load Init Image or Video. Its final frame is used by default; "
+                               "when continuation is enabled, the selected final 1, 5, 22, 39, or 56 frames are used.",
+                }),
             },
         }
 
@@ -2261,8 +2376,8 @@ class SECoursesBatchContinuationFrame:
     DESCRIPTION = (
         "Returns no image for the first folder prompt, then decodes the selected 1, 5, 22, 39, or 56 final "
         "frames of each immediately preceding saved video for use as MiniMax H3 context. For normal (non folder-batch) "
-        "runs the optional init_image input is passed through instead, so the same preset offers an optional "
-        "starting image."
+        "runs an uploaded init video takes priority and supplies its final frame context; otherwise the optional "
+        "init_image input is passed through."
     )
 
     def load(
@@ -2271,11 +2386,25 @@ class SECoursesBatchContinuationFrame:
         continue_batch_with_last_frame,
         continuation_context_frames=1,
         init_image=None,
+        init_video=None,
     ):
         context_frames = _continuation_context_frame_count(continuation_context_frames)
         path = _previous_batch_video(references, bool(continue_batch_with_last_frame))
         if path is None:
-            if init_image is not None and not (isinstance(references, dict) and references.get("batch")):
+            is_batch = isinstance(references, dict) and references.get("batch")
+            init_path = None if is_batch else _init_video_path(init_video)
+            if init_path is not None:
+                selected_frames = context_frames if bool(continue_batch_with_last_frame) else 1
+                print(
+                    f"[SECoursesBatchContinuationFrame] using final {selected_frames} frame(s) "
+                    f"from init video {init_path}",
+                    flush=True,
+                )
+                return ({
+                    "image": _decode_last_video_frames(init_path, selected_frames),
+                    "context_frames": selected_frames if bool(continue_batch_with_last_frame) else 0,
+                },)
+            if init_image is not None and not is_batch:
                 print("[SECoursesBatchContinuationFrame] using the connected init image", flush=True)
                 return ({"image": init_image, "context_frames": 0},)
             # A literal None output is treated as an unavailable dependency by
@@ -2321,6 +2450,10 @@ class SECoursesBatchVideoSaveMerge:
                     "max": 56,
                     "tooltip": "Connect the gallery's 1, 5, 22, 39, or 56-frame context output. Multi-frame replay is removed from the saved result.",
                 }),
+                "init_video": (INIT_VIDEO_TYPE, {
+                    "tooltip": "Optional source from Load Init Image or Video. When Merge videos is enabled, "
+                               "the generated segment is appended to this source video.",
+                }),
             },
             "hidden": {
                 "prompt": "PROMPT",
@@ -2337,7 +2470,8 @@ class SECoursesBatchVideoSaveMerge:
     DESCRIPTION = (
         "Saves each MiniMax H3 folder prompt as its own MP4 before the next queued prompt starts. After the "
         "last prompt, it concatenates the already-saved files once per prompt directory and returns only the "
-        "last complete merged MP4. Normal non-folder generations are saved exactly once."
+        "last complete merged MP4. For a normal init-video run, it can remove the replayed context and append "
+        "the generated segment to the uploaded source video."
     )
 
     @staticmethod
@@ -2358,6 +2492,7 @@ class SECoursesBatchVideoSaveMerge:
         filename_prefix,
         continue_batch_with_last_frame=None,
         continuation_context_frames=None,
+        init_video=None,
         prompt=None,
         extra_pnginfo=None,
     ):
@@ -2403,15 +2538,50 @@ class SECoursesBatchVideoSaveMerge:
             )
         if not context_values:
             context_values = [1] * len(packs)
-        saved = []
-        for clip, pack, continue_enabled, context_value in zip(
-            videos, packs, continuation_flags, context_values
-        ):
-            trim_frames = _continuation_frames_to_trim(
-                pack, bool(continue_enabled), context_value
+
+        if isinstance(init_video, (list, tuple)):
+            init_video_values = list(init_video)
+        elif init_video is None:
+            init_video_values = []
+        else:
+            init_video_values = [init_video]
+        if len(init_video_values) == 1 and len(packs) > 1:
+            init_video_values *= len(packs)
+        if init_video_values and len(init_video_values) != len(packs):
+            raise ValueError(
+                "Video save received a different number of init-video values "
+                f"({len(init_video_values)}) and reference packs ({len(packs)})."
             )
+        if not init_video_values:
+            init_video_values = [{"path": None, "name": None}] * len(packs)
+
+        if isinstance(merge_batch_videos, (list, tuple)):
+            merge_flags = list(merge_batch_videos)
+        else:
+            merge_flags = [merge_batch_videos]
+        if len(merge_flags) == 1 and len(packs) > 1:
+            merge_flags *= len(packs)
+        if len(merge_flags) != len(packs):
+            raise ValueError(
+                "Video save received a different number of merge flags "
+                f"({len(merge_flags)}) and reference packs ({len(packs)})."
+            )
+
+        saved = []
+        init_merged = []
+        for clip, pack, continue_enabled, context_value, init_video_value, merge_flag in zip(
+            videos, packs, continuation_flags, context_values, init_video_values, merge_flags
+        ):
+            init_path = None if isinstance(pack, dict) and pack.get("batch") else _init_video_path(init_video_value)
+            if init_path is not None:
+                requested = _continuation_context_frame_count(context_value)
+                trim_frames = requested if bool(continue_enabled) else (1 if bool(merge_flag) else 0)
+            else:
+                trim_frames = _continuation_frames_to_trim(
+                    pack, bool(continue_enabled), context_value
+                )
             if trim_frames:
-                clip = _trim_video_start(clip, trim_frames)
+                clip = _trim_video_start(clip, trim_frames, trim_audio=trim_frames > 1)
                 print(
                     f"[SECoursesBatchVideoSaveMerge] removed {trim_frames} replayed context "
                     "frame(s) from the saved continuation",
@@ -2426,10 +2596,18 @@ class SECoursesBatchVideoSaveMerge:
                 f"[SECoursesBatchVideoSaveMerge] saved individual video -> {result['fullpath']}",
                 flush=True,
             )
+            if init_path is not None and bool(merge_flag):
+                merged = _merge_init_video_with_generated(init_path, result["fullpath"], prefix)
+                init_merged.append(merged)
+                print(
+                    f"[SECoursesBatchVideoSaveMerge] merged init video + generated segment "
+                    f"-> {merged['fullpath']}",
+                    flush=True,
+                )
 
-        display_saved = saved
-        display_video = _video_from_saved_output(saved[-1])
-        merge_enabled = any(bool(value) for value in merge_batch_videos)
+        display_saved = init_merged or saved
+        display_video = _video_from_saved_output(display_saved[-1])
+        merge_enabled = any(bool(value) for value in merge_flags)
         if merge_enabled and any(_sequential_batch_item(pack) is not None for pack in packs):
             if len(saved) != 1:
                 raise ValueError("Sequential folder batching expects exactly one saved video per queued job.")
@@ -2911,7 +3089,13 @@ class SECoursesMiniMaxH3ReferenceMode:
                 "references": (REF_PACK_TYPE, {
                     "tooltip": "Reference pack from SECourses Reference Gallery."
                 }),
-            }
+            },
+            "optional": {
+                "init_video": (INIT_VIDEO_TYPE, {
+                    "tooltip": "Optional source from Load Init Image or Video. It routes the run through the Auto "
+                               "pipeline so its final-frame context can reach MiniMax H3.",
+                }),
+            },
         }
 
     CATEGORY = "SECourses/references"
@@ -2921,20 +3105,23 @@ class SECoursesMiniMaxH3ReferenceMode:
         "True when the current prompt pack has media references (per item in folder batches). Drives the "
         "FL2VA / Ref2VA checkpoint switch.",
         "True when the current run should go through the Auto FL2VA/Ref2VA pipeline: references exist or this "
-        "is a folder-batch item. Drives a preset's normal-vs-auto route switch.",
+        "is a folder-batch item or an init video is selected. Drives a preset's normal-vs-auto route switch.",
     )
     FUNCTION = "detect"
     DESCRIPTION = (
         "Selects MiniMax H3 Ref2VA only when the current prompt actually has media references. The auto_route "
-        "output is additionally true for every folder-batch item, so presets can route single runs with "
-        "references and all folder batches through the same Auto adapter pipeline."
+        "output is additionally true for every folder-batch item and init-video run, so presets can route them "
+        "through the same Auto adapter pipeline."
     )
 
-    def detect(self, references):
+    def detect(self, references, init_video=None):
         if not isinstance(references, dict):
             raise ValueError("The references input must come from a SECourses Reference Gallery node.")
         has_references = any(references.get(kind) for kind in ("images", "videos", "audios"))
-        return (has_references, has_references or bool(references.get("batch")))
+        return (
+            has_references,
+            has_references or bool(references.get("batch")) or _init_video_path(init_video) is not None,
+        )
 
 
 class SECoursesMiniMaxH3TextOnly:

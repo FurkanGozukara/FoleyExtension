@@ -156,6 +156,22 @@ class BatchContinuationTests(unittest.TestCase):
             ({"image": None, "context_frames": 0},),
         )
 
+    def test_normal_init_video_uses_one_or_selected_final_frames(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as source:
+            init_video = {"path": source.name, "name": "source.mp4"}
+            expected = object()
+            with mock.patch.object(gallery, "_decode_last_video_frames", return_value=expected) as decode:
+                single = gallery.SECoursesBatchContinuationFrame().load(
+                    {"prompt": "normal"}, False, 22, init_image=object(), init_video=init_video
+                )
+                multi = gallery.SECoursesBatchContinuationFrame().load(
+                    {"prompt": "normal"}, True, 22, init_image=object(), init_video=init_video
+                )
+
+        self.assertEqual(single, ({"image": expected, "context_frames": 0},))
+        self.assertEqual(multi, ({"image": expected, "context_frames": 22},))
+        self.assertEqual(decode.call_args_list, [mock.call(source.name, 1), mock.call(source.name, 22)])
+
     def test_batch_items_ignore_the_init_image(self):
         init = object()
         node = gallery.SECoursesBatchContinuationFrame()
@@ -205,6 +221,14 @@ class ReferenceModeRoutingTests(unittest.TestCase):
         with_media = sequential_pack(2)
         with_media["images"] = [{"file": "a.png"}]
         self.assertEqual(self.detect(with_media), (True, True))
+
+    def test_init_video_routes_to_auto_without_becoming_a_reference(self):
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as source:
+            result = gallery.SECoursesMiniMaxH3ReferenceMode().detect(
+                {"prompt": "p", "images": [], "videos": [], "audios": []},
+                {"path": source.name, "name": "source.mp4"},
+            )
+        self.assertEqual(result, (False, True))
 
 
 class MiniMaxAutoRoutingTests(unittest.TestCase):

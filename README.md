@@ -69,6 +69,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     removed when sequential outputs are merged, so they are not duplicated.
     Items with media references remain Ref2VA and items without references use
     FL2VA; continuation does not consume a reference picture slot.
+  - In the image-to-video presets, **Start Frame / Init Video** accepts either
+    an image or a video. A video uses its final frame by default. Enabling
+    **Continue From Last Video Frames** instead uses the selected final 1, 5,
+    22, 39, or 56 frames, and enabling **Merge videos** appends the newly
+    generated segment to the uploaded source video. The same controls retain
+    their existing sequential folder-batch behavior.
   - Video soundtracks take the first native audio slots. With `@video1` and
     standalone `@audio1` attached, use `<Audio 1>` for `@video1`'s soundtrack;
     `@audio1` remains the standalone file and is translated to `<Audio 2>`.
@@ -100,9 +106,10 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   let one workflow choose the task-specific checkpoint lazily: FL2VA when the
   current prompt has no media and Ref2VA when it does. This also works per item
   in recursive folder batches. Reference Mode's second output, `auto_route`, is
-  additionally true for every folder-batch item, so the video presets use it to
-  send both single runs with references and all folder batches through the same
-  Auto FL2VA/Ref2VA pipeline while plain single prompts keep the normal path.
+  additionally true for every folder-batch item or init-video run, so the video
+  presets use it to send single runs with references, uploaded init videos, and
+  all folder batches through the same Auto FL2VA/Ref2VA pipeline while plain
+  single prompts keep the normal path.
 - **MiniMax H3 Auto (Gallery)** combines those paths for video presets. Its
   mode output is diagnostic; **MiniMax H3 Reference Mode** selects the
   checkpoint before model-dependent VAE optimization. Auto applies a
@@ -113,16 +120,17 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
 - **MiniMax H3 Previous Batch Final Frame** validates strict sequential order
   and loads the saved frame used by the optional continuation path. Its
   optional `init_image` input passes a user-selected starting image through on
-  normal (non folder-batch) runs, so one preset also offers an optional init
-  image: FL2VA uses it as the exact first frame, Ref2VA adds it as the
-  starting-frame picture reference. Folder-batch items ignore it and keep
-  using same-basename init images and last-frame continuation.
+  normal (non folder-batch) runs. Its optional `init_video` input supplies the
+  source video's selected final-frame context instead. Folder-batch items ignore
+  both and keep using same-basename init images and last-frame continuation.
 
 - **Save + Merge MiniMax H3 Folder Batch Videos** is the video presets' single
   result node. It saves the current individual MP4 before the next queued prompt
-  starts. On the final job it groups those saved files using the gallery's
+  starts. On the final folder job it groups those saved files using the gallery's
   validated metadata, writes flat `MiniMax_H3_Merged_*.mp4` files in
-  `output/video`, and returns the complete last merge.
+  `output/video`, and returns the complete last merge. For a normal init-video
+  run, it removes replayed context and optionally returns source + generation as
+  one merged MP4.
 
 - **Save + Merge MiniMax H3 Folder Batch Audio** is the audio preset's single
   result node. It saves the current lossless FLAC before the next queued prompt

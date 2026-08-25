@@ -66,9 +66,42 @@ class OptionalImageTests(unittest.TestCase):
     def test_required_loader_delegates_to_core_image_node(self):
         node = optional_image_nodes.SECoursesLoadImage()
 
-        self.assertEqual(node.load_image("start.psd"), ("pixels:start.psd", "mask"))
+        self.assertEqual(
+            node.load_image("start.psd"),
+            ("pixels:start.psd", "mask", {"path": None, "name": None}),
+        )
         self.assertEqual(node.IS_CHANGED("start.psd"), "hash:start.psd")
         self.assertEqual(node.VALIDATE_INPUTS("start.psd"), "valid:start.psd")
+
+    def test_required_loader_accepts_video_and_outputs_its_final_frame(self):
+        import torch
+
+        node = optional_image_nodes.SECoursesLoadImage()
+        frame = torch.ones((1, 4, 6, 3), dtype=torch.float32)
+        with (
+            mock.patch.object(
+                optional_image_nodes.folder_paths,
+                "get_annotated_filepath",
+                return_value="C:/input/start.mp4",
+            ),
+            mock.patch("reference_gallery_nodes._decode_last_video_frames", return_value=frame) as decode,
+        ):
+            image, mask, init_video = node.load_image("start.mp4")
+
+        self.assertIs(image, frame)
+        self.assertEqual(tuple(mask.shape), (1, 4, 6))
+        self.assertEqual(init_video, {"path": "C:/input/start.mp4", "name": "start.mp4"})
+        decode.assert_called_once_with("C:/input/start.mp4", 1)
+
+    def test_required_loader_lists_images_and_videos(self):
+        with tempfile.TemporaryDirectory() as directory:
+            Path(directory, "start.png").touch()
+            Path(directory, "start.mp4").touch()
+            Path(directory, "notes.txt").touch()
+            with mock.patch.object(optional_image_nodes.folder_paths, "get_input_directory", return_value=directory):
+                media_spec = optional_image_nodes.SECoursesLoadImage.INPUT_TYPES()["required"]["image"]
+
+        self.assertEqual(media_spec[0], ["start.mp4", "start.png"])
 
 
 if __name__ == "__main__":

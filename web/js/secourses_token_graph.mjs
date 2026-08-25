@@ -31,6 +31,22 @@ async function imageDescriptor(file) {
     return { kind: "image", file, width: info?.width ?? null, height: info?.height ?? null };
 }
 
+async function initMediaDescriptor(file, slot) {
+    if (!file || file === NO_IMAGE) return null;
+    const info = await mediaInfo(file);
+    const isVideo = info?.kind === "video" || /\.(?:3g2|3gp|avi|f4v|flv|m2ts|m4v|mkv|mov|mp4|mpeg|mpg|mts|ogv|rm|ts|vob|webm|wmv)(?: \[(?:input|output|temp)\])?$/i.test(file);
+    if (slot === 2) {
+        return isVideo ? {
+            kind: "initVideo", file,
+            width: info?.width ?? null, height: info?.height ?? null,
+            duration: info?.duration ?? null, hasAudio: info ? info.has_audio !== false : true,
+        } : null;
+    }
+    return slot === 0
+        ? { kind: "image", file, width: info?.width ?? null, height: info?.height ?? null }
+        : undefined;
+}
+
 async function audioDescriptor(file) {
     if (!file || file === NO_AUDIO) return null;
     const info = await mediaInfo(file);
@@ -272,7 +288,7 @@ export const NODE_EVALUATORS = {
         return ctx.input(node, on ? "on_true" : "on_false");
     },
     LoadImage: async (ctx, node, slot) => (slot === 0 ? imageDescriptor(await ctx.input(node, "image")) : undefined),
-    SECoursesLoadImage: async (ctx, node, slot) => (slot === 0 ? imageDescriptor(await ctx.input(node, "image")) : undefined),
+    SECoursesLoadImage: async (ctx, node, slot) => initMediaDescriptor(await ctx.input(node, "image"), slot),
     SECoursesOptionalImage: async (ctx, node) => imageDescriptor(await ctx.input(node, "image")),
     SECoursesBatchContinuationFrame: async (ctx, node) => {
         const pack = await ctx.input(node, "references");
@@ -280,6 +296,14 @@ export const NODE_EVALUATORS = {
             const enabled = asBool(await ctx.input(node, "continue_batch_with_last_frame")) === true;
             if (!enabled) return null;
             const frames = asNumber(await ctx.input(node, "continuation_context_frames")) ?? 1;
+            return { kind: "continuation", frames };
+        }
+        const initVideo = await ctx.input(node, "init_video");
+        if (initVideo) {
+            const enabled = asBool(await ctx.input(node, "continue_batch_with_last_frame")) === true;
+            const frames = enabled
+                ? asNumber(await ctx.input(node, "continuation_context_frames")) ?? 1
+                : 1;
             return { kind: "continuation", frames };
         }
         return (await ctx.input(node, "init_image")) ?? null;
@@ -308,8 +332,9 @@ export const NODE_EVALUATORS = {
         const pack = await ctx.input(node, "references");
         if (!pack) return undefined;
         const hasRefs = pack.images.length + pack.videos.length + pack.audios.length > 0;
-        // slot 0 = has_references, slot 1 = auto_route (references or folder-batch item)
-        return slot === 1 ? hasRefs || pack.batchActive === true : hasRefs;
+        // slot 0 = has_references, slot 1 = auto_route (references, folder batch, or init video)
+        const initVideo = await ctx.input(node, "init_video");
+        return slot === 1 ? hasRefs || pack.batchActive === true || Boolean(initVideo) : hasRefs;
     },
     [GALLERY_CLASS]: async (ctx, node, slot) => {
         const manifest = parseManifest(await ctx.input(node, "references"));
@@ -317,8 +342,8 @@ export const NODE_EVALUATORS = {
         const batchFolder = String((await ctx.input(node, "batch_folder")) ?? "").trim();
         if (slot === 1) return prompt;
         if (slot === 2) return batchFolder !== "";
-        if (slot === 3) return asBool(await ctx.input(node, "merge_batch_videos")) === true && batchFolder !== "";
-        if (slot === 4) return asBool(await ctx.input(node, "continue_batch_with_last_frame")) === true && batchFolder !== "";
+        if (slot === 3) return asBool(await ctx.input(node, "merge_batch_videos")) === true;
+        if (slot === 4) return asBool(await ctx.input(node, "continue_batch_with_last_frame")) === true;
         if (slot === 5) return asNumber(await ctx.input(node, "continuation_context_frames")) ?? 1;
         const describe = async (entries, kind) => Promise.all(entries.map(async (entry) => {
             const info = await mediaInfo(entry.file);

@@ -373,7 +373,7 @@ class ReferenceGalleryUI {
 
         this.mergeToggle = document.createElement("label");
         this.mergeToggle.className = "secourses-refgal-mergetoggle";
-        this.mergeToggle.title = "Save each prompt's MP4 before the next queued prompt starts, then create one merged MP4 per prompt directory after the final job. The complete last merge is returned.";
+        this.mergeToggle.title = "With an init video, append the generated segment to it. With Folder batch, save each prompt's MP4 and merge each prompt directory after the final job.";
         this.mergeCheckbox = document.createElement("input");
         this.mergeCheckbox.type = "checkbox";
         this.mergeCheckbox.setAttribute("role", "switch");
@@ -393,7 +393,7 @@ class ReferenceGalleryUI {
         this.continuationControls.className = "secourses-refgal-continuationcontrols";
         this.lastFrameToggle = document.createElement("label");
         this.lastFrameToggle.className = "secourses-refgal-mergetoggle secourses-refgal-continuationtoggle";
-        this.lastFrameToggle.title = "After each folder prompt finishes and saves, use the selected final video frames as context for the next prompt. One frame preserves the original behavior; 5, 22, 39, and 56 use MiniMax H3's native clip guide.";
+        this.lastFrameToggle.title = "Use the selected final frames from an init video, or from the preceding Folder batch result. One frame preserves the original behavior; 5, 22, 39, and 56 use MiniMax H3's native clip guide.";
         this.lastFrameCheckbox = document.createElement("input");
         this.lastFrameCheckbox.type = "checkbox";
         this.lastFrameCheckbox.setAttribute("role", "switch");
@@ -784,7 +784,7 @@ class ReferenceGalleryUI {
         } else {
             this.mergeLabel.textContent = "Merge videos";
             this.mergeCheckbox.setAttribute("aria-label", "Merge videos");
-            this.mergeToggle.title = "Save each prompt's MP4 before the next queued prompt starts, then create one merged MP4 per prompt directory after the final job. The complete last merge is returned.";
+            this.mergeToggle.title = "With an init video, append the generated segment to it. With Folder batch, save each prompt's MP4 and merge each prompt directory after the final job.";
         }
         this.mergeToggle.hidden = !available;
         this.mergeCheckbox.disabled = !available;

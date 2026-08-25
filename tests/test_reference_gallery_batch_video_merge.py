@@ -1,4 +1,6 @@
 import sys
+import subprocess
+import tempfile
 import unittest
 from pathlib import Path
 from unittest import mock
@@ -106,6 +108,19 @@ class BatchVideoMergeTests(unittest.TestCase):
         self.assertEqual(result[4], [False, False])
         self.assertEqual(result[5], [1, 1])
 
+    def test_gallery_exposes_init_video_toggles_for_normal_runs(self):
+        result = gallery.SECoursesReferenceGallery().collect(
+            "prompt", "{}", 24, 15,
+            merge_batch_videos=True,
+            continue_batch_with_last_frame=True,
+            continuation_context_frames=22,
+        )
+
+        self.assertEqual(result[2], [False])
+        self.assertEqual(result[3], [True])
+        self.assertEqual(result[4], [True])
+        self.assertEqual(result[5], [22])
+
     def test_gallery_selects_one_sequential_prompt_per_queued_job(self):
         packs = (
             [
@@ -204,9 +219,78 @@ class BatchVideoMergeTests(unittest.TestCase):
             gallery.SECoursesBatchVideoSaveMerge().save_and_merge(
                 ["generated"], [pack], [False], ["video/MiniMax_H3"], [True], [22]
             )
-        trim.assert_called_once_with("generated", 22)
+        trim.assert_called_once_with("generated", 22, trim_audio=True)
         self.assertEqual(save.call_args.args[0], "trimmed")
         gallery._BATCH_CONTINUATION_SESSIONS.clear()
+
+    def test_normal_init_video_is_trimmed_and_merged_when_enabled(self):
+        saved = {
+            "filename": "generated.mp4", "subfolder": "video", "type": "output",
+            "fullpath": "C:/output/generated.mp4",
+        }
+        merged = {
+            "filename": "merged.mp4", "subfolder": "video", "type": "output",
+            "fullpath": "C:/output/merged.mp4",
+        }
+        with tempfile.NamedTemporaryFile(suffix=".mp4") as source:
+            with (
+                mock.patch.object(gallery, "_trim_video_start", return_value="trimmed") as trim,
+                mock.patch.object(gallery, "_save_video_output", return_value=saved) as save,
+                mock.patch.object(gallery, "_merge_init_video_with_generated", return_value=merged) as merge,
+                mock.patch.object(gallery, "_video_from_saved_output", return_value="preview"),
+            ):
+                result = gallery.SECoursesBatchVideoSaveMerge().save_and_merge(
+                    ["generated"], [{"prompt": "normal"}], [True], ["video/MiniMax_H3"],
+                    [False], [22], [{"path": source.name, "name": "source.mp4"}],
+                )
+
+        trim.assert_called_once_with("generated", 1, trim_audio=False)
+        self.assertEqual(save.call_args.args[0], "trimmed")
+        merge.assert_called_once_with(source.name, "C:/output/generated.mp4", "video/MiniMax_H3")
+        self.assertEqual(result["ui"]["images"][0]["filename"], "merged.mp4")
+        self.assertEqual(result["result"], ("preview",))
+
+    def test_init_video_ffmpeg_merge_preserves_order_and_audio(self):
+        try:
+            import av
+            from imageio_ffmpeg import get_ffmpeg_exe
+        except ImportError as error:
+            self.skipTest(f"FFmpeg integration dependencies are unavailable: {error}")
+
+        with tempfile.TemporaryDirectory() as directory:
+            source = Path(directory, "source.mp4")
+            generated = Path(directory, "generated.mp4")
+            ffmpeg = get_ffmpeg_exe()
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=red:s=64x48:r=12:d=0.5",
+                "-f", "lavfi", "-i", "sine=frequency=440:sample_rate=48000:duration=0.5",
+                "-shortest", "-c:v", "libx264", "-pix_fmt", "yuv420p", "-c:a", "aac", str(source),
+            ], check=True)
+            subprocess.run([
+                ffmpeg, "-hide_banner", "-loglevel", "error", "-y",
+                "-f", "lavfi", "-i", "color=c=blue:s=64x48:r=12:d=0.5",
+                "-c:v", "libx264", "-pix_fmt", "yuv420p", str(generated),
+            ], check=True)
+
+            with (
+                mock.patch("folder_paths.get_output_directory", return_value=directory),
+                mock.patch(
+                    "folder_paths.get_save_image_path",
+                    return_value=(directory, "merged", 1, "", ""),
+                ),
+            ):
+                merged = gallery._merge_init_video_with_generated(source, generated, "video/test")
+
+            info = gallery._media_info(merged["fullpath"])
+            self.assertEqual((info["width"], info["height"]), (64, 48))
+            self.assertTrue(info["has_audio"])
+            self.assertGreater(info["duration"], 0.8)
+            self.assertLess(info["duration"], 1.2)
+            with av.open(merged["fullpath"]) as container:
+                frames = [frame.to_ndarray(format="rgb24") for frame in container.decode(video=0)]
+            self.assertGreater(frames[0][..., 0].mean(), frames[0][..., 2].mean())
+            self.assertGreater(frames[-1][..., 2].mean(), frames[-1][..., 0].mean())
 
 
 if __name__ == "__main__":
