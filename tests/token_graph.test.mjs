@@ -42,6 +42,7 @@ const gallery = (overrides = {}) => ({
         batch_folder: "",
         merge_batch_videos: false,
         continue_batch_with_last_frame: false,
+        continuation_context_frames: 1,
         match_batch_init_media: true,
         ...overrides,
     },
@@ -54,9 +55,9 @@ const gallery = (overrides = {}) => ({
  * auto_route output, so single runs with references use the auto adapter too); the default `"legacy"`
  * shape switches on the gallery's folder_batch_active output only.
  */
-function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAudio = "(none - disabled)", initAudioTrim = {}, durationMode = "match init audio length", firstFrame = null, faceOn = false, router = "legacy", initImage = null } = {}) {
+function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", continueVideo = false, contextFrames = 1, initAudio = "(none - disabled)", initAudioTrim = {}, durationMode = "match init audio length", firstFrame = null, faceOn = false, router = "legacy", initImage = null } = {}) {
     const output = {
-        "119": gallery({ references: refs, batch_folder: batchFolder }),
+        "119": gallery({ references: refs, batch_folder: batchFolder, continue_batch_with_last_frame: continueVideo, continuation_context_frames: contextFrames }),
         "115": { inputs: { aspect_ratio: "16:9 (Widescreen)", megapixels: 0.4, width: 864, height: 480, multiple: 32 }, class_type: "SECoursesResolutionSync" },
         "120": { inputs: { value: duration }, class_type: "PrimitiveFloat" },
         "187": { inputs: { audio: initAudio, duration_seconds: ["120", 0], duration_mode: durationMode, ...initAudioTrim }, class_type: "SECoursesInitAudio" },
@@ -72,7 +73,7 @@ function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAu
         // "Folder Batch Auto" subgraph, flattened
         "121:136": { inputs: { expression: LENGTH_GRID, "values.a": ["143", 0] }, class_type: "ComfyMathExpression" },
         "121:135": { inputs: { clip: ["121:132", 0], vae: ["121:123", 0], audio_vae: ["121:124", 0], references: ["119", 0], continuation_frame: ["144", 0], width: ["115", 0], height: ["115", 1], length: ["121:136", 1], ref_image_size: "match" }, class_type: "SECoursesMiniMaxH3Auto" },
-        "144": { inputs: { references: ["119", 0], continue_batch_with_last_frame: ["119", 4], ...(initImage ? { init_image: ["114", 0] } : {}) }, class_type: "SECoursesBatchContinuationFrame" },
+        "144": { inputs: { references: ["119", 0], continue_batch_with_last_frame: ["119", 4], continuation_context_frames: ["119", 5], ...(initImage ? { init_image: ["114", 0] } : {}) }, class_type: "SECoursesBatchContinuationFrame" },
         "121:185": { inputs: { positive: ["121:135", 0], latent: ["121:135", 1], audio_vae: ["121:124", 0], init_audio: ["187", 0], audio_conditioning: "lock soundtrack + guide", references: ["119", 0] }, class_type: "SECoursesMiniMaxH3InitAudio" },
         "121:130": { inputs: { model: ["121:131", 0], conditioning: ["121:185", 0] }, class_type: "BasicGuider" },
         "121:129": { inputs: { noise: ["121:133", 0], guider: ["121:130", 0], sampler: ["121:127", 0], sigmas: ["121:128", 0], latent_image: ["121:185", 1] }, class_type: "SamplerCustomAdvanced" },
@@ -86,7 +87,7 @@ function textToVideoPrompt({ duration = 5, refs = "{}", batchFolder = "", initAu
         "154:181": { inputs: { images: ["154:1", 0], guider_cond: ["154:3", 0] }, class_type: "SamplerCustomAdvanced" },
         "154:184": { inputs: { images: ["154:181", 0] }, class_type: "CreateVideo" },
         "163": { inputs: { switch: ["153", 0], on_false: ["122", 0], on_true: ["154:184", 0] }, class_type: "ComfySwitchNode" },
-        "92": { inputs: { video: ["163", 0], references: ["119", 0], continue_batch_with_last_frame: ["119", 4], merge_batch_videos: ["119", 3], filename_prefix: "video/MiniMax_H3" }, class_type: "SECoursesBatchVideoSaveMerge" },
+        "92": { inputs: { video: ["163", 0], references: ["119", 0], continue_batch_with_last_frame: ["119", 4], continuation_context_frames: ["119", 5], merge_batch_videos: ["119", 3], filename_prefix: "video/MiniMax_H3" }, class_type: "SECoursesBatchVideoSaveMerge" },
     };
     if (firstFrame) output["114"] = { inputs: { image: firstFrame }, class_type: "SECoursesLoadImage" };
     if (initImage) output["114"] = { inputs: { image: initImage }, class_type: "SECoursesLoadImage" };
@@ -142,6 +143,19 @@ test("folder route: the auto adapter attaches the gallery references", async () 
     const expectedRef = H3.estimate({ width: 864, height: 480, frames: 124, refImages: [{ width: 1920, height: 1080 }], pipeline: "secourses" }).parts.refImages;
     assert.equal(result.estimate.parts.refImages, expectedRef);
     assert.equal(result.label, "reference to video");
+});
+
+test("folder continuation counts a native multi-frame guide clip", async () => {
+    const result = await estimateFromPrompt(textToVideoPrompt({
+        duration: 5,
+        batchFolder: "D:/prompts",
+        continueVideo: true,
+        contextFrames: 22,
+        router: "auto",
+    }), 119);
+    assert.ok(result.estimate, result.reason);
+    assert.equal(result.estimate.parts.keyframes, H3.videoLatentT(22) * result.estimate.rows);
+    assert.equal(result.label, "image to video");
 });
 
 test("auto-routed preset shape: single runs with references take the auto adapter", async () => {

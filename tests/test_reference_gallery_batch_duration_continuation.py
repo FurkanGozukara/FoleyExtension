@@ -1,5 +1,8 @@
 import tempfile
+import sys
+import types
 import unittest
+from fractions import Fraction
 from pathlib import Path
 from unittest import mock
 
@@ -95,20 +98,46 @@ class BatchContinuationTests(unittest.TestCase):
         with self.assertRaisesRegex(ValueError, "previous completed video"):
             gallery._previous_batch_video(sequential_pack(2), True)
 
+    def test_only_multi_frame_replay_is_trimmed_from_later_batch_items(self):
+        self.assertEqual(gallery._continuation_frames_to_trim(sequential_pack(1), True, 22), 0)
+        self.assertEqual(gallery._continuation_frames_to_trim(sequential_pack(2), True, 1), 0)
+        self.assertEqual(gallery._continuation_frames_to_trim(sequential_pack(2), False, 22), 0)
+        self.assertEqual(gallery._continuation_frames_to_trim(sequential_pack(2), True, 22), 22)
+        with_init = sequential_pack(2)
+        with_init["init_image"] = {"file": "shot.png"}
+        self.assertEqual(gallery._continuation_frames_to_trim(with_init, True, 22), 0)
+
+    def test_context_frame_choices_are_strict(self):
+        for value in (1, "5", 22, "39", 56):
+            self.assertEqual(gallery._continuation_context_frame_count(value), int(value))
+        for value in (0, 2, 57, "bad"):
+            with self.subTest(value=value), self.assertRaisesRegex(ValueError, "1, 5, 22, 39, or 56"):
+                gallery._continuation_context_frame_count(value)
+
     def test_continuation_node_decodes_registered_previous_video(self):
         first = sequential_pack(1, count=2)
         second = sequential_pack(2, count=2)
         gallery._record_batch_video_for_continuation(first, "first.mp4", True)
         expected = object()
-        with mock.patch.object(gallery, "_decode_last_video_frame", return_value=expected) as decode:
+        with mock.patch.object(gallery, "_decode_last_video_frames", return_value=expected) as decode:
             result = gallery.SECoursesBatchContinuationFrame().load(second, True)
-        self.assertEqual(result, ({"image": expected},))
-        decode.assert_called_once_with("first.mp4")
+        self.assertEqual(result, ({"image": expected, "context_frames": 1},))
+        decode.assert_called_once_with("first.mp4", 1)
+
+    def test_continuation_node_decodes_selected_native_context_length(self):
+        first = sequential_pack(1, count=2)
+        second = sequential_pack(2, count=2)
+        gallery._record_batch_video_for_continuation(first, "first.mp4", True)
+        expected = object()
+        with mock.patch.object(gallery, "_decode_last_video_frames", return_value=expected) as decode:
+            result = gallery.SECoursesBatchContinuationFrame().load(second, True, 39)
+        self.assertEqual(result, ({"image": expected, "context_frames": 39},))
+        decode.assert_called_once_with("first.mp4", 39)
 
     def test_first_item_returns_a_concrete_empty_optional_value(self):
         self.assertEqual(
             gallery.SECoursesBatchContinuationFrame().load(sequential_pack(1), True),
-            ({"image": None},),
+            ({"image": None, "context_frames": 0},),
         )
 
     def test_normal_run_passes_the_init_image_through(self):
@@ -116,24 +145,27 @@ class BatchContinuationTests(unittest.TestCase):
         node = gallery.SECoursesBatchContinuationFrame()
         self.assertEqual(
             node.load({"prompt": "normal"}, False, init_image=init),
-            ({"image": init},),
+            ({"image": init, "context_frames": 0},),
         )
         self.assertEqual(
             node.load({"prompt": "normal"}, True, init_image=init),
-            ({"image": init},),
+            ({"image": init, "context_frames": 0},),
         )
-        self.assertEqual(node.load({"prompt": "normal"}, False), ({"image": None},))
+        self.assertEqual(
+            node.load({"prompt": "normal"}, False),
+            ({"image": None, "context_frames": 0},),
+        )
 
     def test_batch_items_ignore_the_init_image(self):
         init = object()
         node = gallery.SECoursesBatchContinuationFrame()
         self.assertEqual(
             node.load(sequential_pack(1), True, init_image=init),
-            ({"image": None},),
+            ({"image": None, "context_frames": 0},),
         )
         self.assertEqual(
             node.load(sequential_pack(2), False, init_image=init),
-            ({"image": None},),
+            ({"image": None, "context_frames": 0},),
         )
 
     def test_batch_continuation_frame_wins_over_the_init_image(self):
@@ -141,11 +173,11 @@ class BatchContinuationTests(unittest.TestCase):
         second = sequential_pack(2, count=2)
         gallery._record_batch_video_for_continuation(first, "first.mp4", True)
         expected = object()
-        with mock.patch.object(gallery, "_decode_last_video_frame", return_value=expected):
+        with mock.patch.object(gallery, "_decode_last_video_frames", return_value=expected):
             result = gallery.SECoursesBatchContinuationFrame().load(
                 second, True, init_image=object()
             )
-        self.assertEqual(result, ({"image": expected},))
+        self.assertEqual(result, ({"image": expected, "context_frames": 1},))
 
 
 class ReferenceModeRoutingTests(unittest.TestCase):
@@ -211,6 +243,65 @@ class MiniMaxAutoRoutingTests(unittest.TestCase):
             )
         self.assertEqual(result, ("positive", "latent", True))
         self.assertIs(references.call_args.kwargs["continuation_frame"], frame)
+
+    def test_multi_frame_context_uses_native_guide_without_single_frame_conditioning(self):
+        frames = object()
+        guide = mock.Mock()
+        guide.execute.return_value = types.SimpleNamespace(args=("guided-positive",))
+        fake_module = types.SimpleNamespace(MiniMaxH3AddGuide=guide)
+        with mock.patch.object(
+            gallery.SECoursesMiniMaxH3TextOnly,
+            "encode",
+            return_value=("positive", "latent"),
+        ) as text_only, mock.patch.dict(
+            "sys.modules", {"comfy_extras.nodes_minimax_h3": fake_module}
+        ):
+            result = gallery.SECoursesMiniMaxH3Auto().encode(
+                clip=object(), vae="vae", audio_vae=object(),
+                references={"prompt": "go", "images": [], "videos": [], "audios": []},
+                width=640, height=384, length=124, ref_image_size="match",
+                continuation_frame={"image": frames, "context_frames": 22},
+            )
+        self.assertEqual(result, ("guided-positive", "latent", False))
+        self.assertIsNone(text_only.call_args.kwargs["first_frame"])
+        guide.execute.assert_called_once_with(
+            positive="positive", vae="vae", latent="latent", image=frames, frame_idx=0
+        )
+
+    def test_multi_frame_context_requires_new_frames(self):
+        with self.assertRaisesRegex(ValueError, "longer than its 39-frame"):
+            gallery.SECoursesMiniMaxH3Auto().encode(
+                clip=object(), vae=object(), audio_vae=object(),
+                references={"prompt": "go", "images": [], "videos": [], "audios": []},
+                width=640, height=384, length=39, ref_image_size="match",
+                continuation_frame={"image": object(), "context_frames": 39},
+            )
+
+
+class ContinuationVideoTrimTests(unittest.TestCase):
+    def test_video_and_audio_are_trimmed_by_the_same_frame_duration(self):
+        comfy_root = str(Path(__file__).resolve().parents[3])
+        if comfy_root not in sys.path:
+            sys.path.insert(0, comfy_root)
+        try:
+            import torch
+            from comfy_api.latest import Input, InputImpl, Types
+        except (ImportError, RuntimeError) as error:
+            self.skipTest(f"ComfyUI video API unavailable: {error}")
+
+        images = torch.arange(30 * 2 * 2 * 3, dtype=torch.float32).reshape(30, 2, 2, 3)
+        waveform = torch.arange(2 * 3000, dtype=torch.float32).reshape(1, 2, 3000)
+        video = InputImpl.VideoFromComponents(Types.VideoComponents(
+            images=images,
+            audio=Input.Audio({"waveform": waveform, "sample_rate": 2400}),
+            frame_rate=Fraction(24),
+        ))
+
+        components = gallery._trim_video_start(video, 22).get_components()
+        self.assertEqual(tuple(components.images.shape), (8, 2, 2, 3))
+        self.assertTrue(torch.equal(components.images[0], images[22]))
+        self.assertEqual(tuple(components.audio["waveform"].shape), (1, 2, 800))
+        self.assertTrue(torch.equal(components.audio["waveform"][..., 0], waveform[..., 2200]))
 
 
 if __name__ == "__main__":

@@ -69,6 +69,16 @@ test("unknown reference metadata is assumed at the caps and flagged", () => {
     assert.ok(est.parts.refImages > 0 && est.parts.refVideos > 0 && est.parts.refAudios > 0);
 });
 
+test("native continuation clips contribute their encoded video latent", () => {
+    const est = H3.estimate({
+        width: 864,
+        height: 480,
+        frames: 124,
+        keyframeVideoFrames: 39,
+    });
+    assert.equal(est.parts.keyframes, H3.videoLatentT(39) * est.rows);
+});
+
 test("formatting", () => {
     assert.equal(H3.formatTokens(999), "999");
     assert.equal(H3.formatTokens(38144), "38.1k");

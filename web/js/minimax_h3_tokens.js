@@ -253,6 +253,7 @@
      *   refImages: [{width, height}], refVideos: [{width, height, duration, hasAudio, trimStart, trimEnd}],
      *   refAudios: [{duration, trimStart, trimEnd}],   // unknown metadata (null) is assumed at the caps
      *   keyframeImages,              // first/last-frame style image keyframes (fl2va)
+     *   keyframeVideoFrames,         // native multi-frame guide clip (5, 22, 39, or 56 frames)
      *   audioGuide,                  // init audio guide keyframe (whole soundtrack, t=1.0)
      *   textTokens                   // optional exact Qwen token count override
      * }
@@ -279,6 +280,8 @@
             parts.keyframes += keyframeImages * rows;                 // one latent frame each
             parts.text += keyframeImages * (labelTokens("image", 1) + 2) + keyframeImages * qwenVisionTokens(width, height);
         }
+        const keyframeVideoFrames = Math.max(0, Math.trunc(Number(s.keyframeVideoFrames) || 0));
+        if (keyframeVideoFrames) parts.keyframes += videoLatentT(keyframeVideoFrames) * rows;
         if (s.audioGuide) parts.keyframes += audioT * 2;
 
         const images = (s.refImages || []).slice(0, MAX_IMAGES);

@@ -62,12 +62,13 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     audio to video; providing both combines the first-frame image and locked
     soundtrack. Same-name init files are reserved for their prompt and are not
     also attached as references. Unmatched media remains reference material.
-  - **Continue from last frame** is available beside the video merge control
-    and is off by default. The first item starts normally. After every later
-    prompt, only the preceding saved video's final frame is decoded and used as
-    the next starting image. Items with media references remain Ref2VA; items
-    without references use FL2VA. Ref2VA continuation reserves one of its nine
-    picture slots, so the prompt may use at most eight additional images.
+  - **Continue From Last Video Frames** is available beside the video merge
+    control and is off by default. Choose 1, 5, 22, 39, or 56 context frames;
+    1 preserves the original final-frame behavior, while the larger choices use
+    MiniMax H3's native clip guide. The selected leading replay frames are
+    removed when sequential outputs are merged, so they are not duplicated.
+    Items with media references remain Ref2VA and items without references use
+    FL2VA; continuation does not consume a reference picture slot.
   - Video soundtracks take the first native audio slots. With `@video1` and
     standalone `@audio1` attached, use `<Audio 1>` for `@video1`'s soundtrack;
     `@audio1` remains the standalone file and is translated to `<Audio 2>`.

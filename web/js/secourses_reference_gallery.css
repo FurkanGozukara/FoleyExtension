@@ -652,6 +652,39 @@ audio.secourses-refgal-media {
     height: 34px;
 }
 
+.secourses-refgal-continuationcontrols {
+    align-items: center;
+    display: flex;
+    flex: 0 1 auto;
+    gap: 6px;
+    min-width: 0;
+}
+
+.secourses-refgal-continuationcontrols[hidden] {
+    display: none !important;
+}
+
+.secourses-refgal-contextframes {
+    background: var(--comfy-input-bg, #1f1f1f);
+    border: 1px solid var(--refgal-border);
+    border-radius: 6px;
+    color: var(--refgal-fg);
+    flex: 0 0 58px;
+    font-size: 11px;
+    height: 34px;
+    padding: 0 6px;
+}
+
+.secourses-refgal-contextframes:hover:not(:disabled),
+.secourses-refgal-contextframes:focus-visible {
+    border-color: #36a269;
+}
+
+.secourses-refgal-contextframes:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
 .secourses-refgal-mergetoggle[hidden] {
     display: none !important;
 }

@@ -241,7 +241,7 @@ class ReferenceGalleryMediaSafetyTests(unittest.TestCase):
             mock.patch.object(gallery, "_load_reference_image", side_effect=AssertionError("eager image decode")),
             mock.patch.object(gallery, "_decode_video_frames", side_effect=AssertionError("eager video decode")),
         ):
-            packs, prompts, active, merge, continuation = node.collect(
+            packs, prompts, active, merge, continuation, context = node.collect(
                 "keep @image1 and @video1", manifest, 24, 15
             )
 
@@ -252,6 +252,7 @@ class ReferenceGalleryMediaSafetyTests(unittest.TestCase):
         self.assertEqual(active, [False])
         self.assertEqual(merge, [False])
         self.assertEqual(continuation, [False])
+        self.assertEqual(context, [1])
         self.assertNotIn("pixels", pack["images"][0])
         self.assertNotIn("frames", pack["videos"][0])
 

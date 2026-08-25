@@ -104,6 +104,7 @@ class BatchVideoMergeTests(unittest.TestCase):
         self.assertEqual(result[2], [True, True])
         self.assertEqual(result[3], [True, True])
         self.assertEqual(result[4], [False, False])
+        self.assertEqual(result[5], [1, 1])
 
     def test_gallery_selects_one_sequential_prompt_per_queued_job(self):
         packs = (
@@ -185,6 +186,27 @@ class BatchVideoMergeTests(unittest.TestCase):
     def test_combined_video_output_exposes_video_result(self):
         self.assertEqual(gallery.SECoursesBatchVideoSaveMerge.RETURN_TYPES, ("VIDEO",))
         self.assertEqual(gallery.SECoursesBatchVideoSaveMerge.RETURN_NAMES, ("video",))
+
+    def test_combined_video_output_removes_multi_frame_replay_before_saving(self):
+        pack = {"batch": {
+            "root": "C:/batch", "folder": "root", "index": 2, "count": 3,
+            "run_id": "run_context_1234", "sequential": True,
+        }}
+        saved = {
+            "filename": "trimmed.mp4", "subfolder": "video", "type": "output",
+            "fullpath": "C:/output/trimmed.mp4",
+        }
+        with (
+            mock.patch.object(gallery, "_trim_video_start", return_value="trimmed") as trim,
+            mock.patch.object(gallery, "_save_video_output", return_value=saved) as save,
+            mock.patch.object(gallery, "_video_from_saved_output", return_value="preview"),
+        ):
+            gallery.SECoursesBatchVideoSaveMerge().save_and_merge(
+                ["generated"], [pack], [False], ["video/MiniMax_H3"], [True], [22]
+            )
+        trim.assert_called_once_with("generated", 22)
+        self.assertEqual(save.call_args.args[0], "trimmed")
+        gallery._BATCH_CONTINUATION_SESSIONS.clear()
 
 
 if __name__ == "__main__":

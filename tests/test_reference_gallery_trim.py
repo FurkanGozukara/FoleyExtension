@@ -76,7 +76,7 @@ class ReferenceGalleryTrimManifestTests(unittest.TestCase):
         with mock.patch.object(
             gallery, "_decode_video_frames", side_effect=AssertionError("eager video decode")
         ):
-            packs, _prompts, _active, _merge, _continue = node.collect(
+            packs, _prompts, _active, _merge, _continue, _context = node.collect(
                 "use @video1", manifest, 24, 15
             )
         self.assertEqual(packs[0]["videos"][0]["trim_start"], 1.0)
@@ -103,6 +103,21 @@ class ReferenceGalleryTrimDecodeTests(unittest.TestCase):
                     container.mux(packet)
             for packet in stream.encode():
                 container.mux(packet)
+
+    def test_continuation_decoder_returns_exact_chronological_tail(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "tail.mp4"
+            self.write_index_video(path, frame_count=72)
+            frames = gallery._decode_last_video_frames(path, 22)
+        self.assertEqual(tuple(frames.shape), (22, 192, 320, 3))
+        self.assertLess(float(frames[0, ..., 0].mean()), float(frames[-1, ..., 0].mean()))
+
+    def test_continuation_decoder_rejects_a_too_short_video(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            path = Path(temp_dir) / "short.mp4"
+            self.write_index_video(path, frame_count=24)
+            with self.assertRaisesRegex(ValueError, "56 context frames"):
+                gallery._decode_last_video_frames(path, 56)
 
     def test_video_trim_start_skips_leading_frames(self):
         with tempfile.TemporaryDirectory() as temp_dir:

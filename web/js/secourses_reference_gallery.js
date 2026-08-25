@@ -259,6 +259,7 @@ class ReferenceGalleryUI {
         this.batchFolderWidget = node.widgets?.find((w) => w.name === "batch_folder");
         this.mergeBatchWidget = node.widgets?.find((w) => w.name === "merge_batch_videos");
         this.continueLastFrameWidget = node.widgets?.find((w) => w.name === "continue_batch_with_last_frame");
+        this.contextFramesWidget = node.widgets?.find((w) => w.name === "continuation_context_frames");
         this.state = { images: [], videos: [], audios: [] };
         this.suggestIndex = 0;
         this.suggestMatches = null;
@@ -271,6 +272,7 @@ class ReferenceGalleryUI {
         hideWidget(this.batchFolderWidget);
         hideWidget(this.mergeBatchWidget);
         hideWidget(this.continueLastFrameWidget);
+        hideWidget(this.contextFramesWidget);
         const ui = this;
         this.widget = node.addDOMWidget("gallery_ui", "secourses_gallery", this.root, {
             hideOnZoom: false,
@@ -386,21 +388,34 @@ class ReferenceGalleryUI {
         this.continuationRow = document.createElement("div");
         this.continuationRow.className = "secourses-refgal-continuationrow";
         this.tokenMeter = new TokenMeter("secourses-refgal-tokens");
+        this.continuationControls = document.createElement("div");
+        this.continuationControls.className = "secourses-refgal-continuationcontrols";
         this.lastFrameToggle = document.createElement("label");
         this.lastFrameToggle.className = "secourses-refgal-mergetoggle secourses-refgal-continuationtoggle";
-        this.lastFrameToggle.title = "After each folder prompt finishes and saves, use only that video's final frame as the next prompt's starting image. Prompts with other references stay on Ref2VA; prompts without references use FL2VA.";
+        this.lastFrameToggle.title = "After each folder prompt finishes and saves, use the selected final video frames as context for the next prompt. One frame preserves the original behavior; 5, 22, 39, and 56 use MiniMax H3's native clip guide.";
         this.lastFrameCheckbox = document.createElement("input");
         this.lastFrameCheckbox.type = "checkbox";
         this.lastFrameCheckbox.setAttribute("role", "switch");
-        this.lastFrameCheckbox.setAttribute("aria-label", "Continue from last frame");
+        this.lastFrameCheckbox.setAttribute("aria-label", "Continue From Last Video Frames");
         const lastFrameTrack = document.createElement("span");
         lastFrameTrack.className = "secourses-refgal-mergetrack";
         lastFrameTrack.setAttribute("aria-hidden", "true");
         const lastFrameLabel = document.createElement("span");
         lastFrameLabel.className = "secourses-refgal-mergelabel";
-        lastFrameLabel.textContent = "Continue from last frame";
+        lastFrameLabel.textContent = "Continue From Last Video Frames";
         this.lastFrameToggle.append(this.lastFrameCheckbox, lastFrameTrack, lastFrameLabel);
-        this.continuationRow.append(this.tokenMeter.element, this.lastFrameToggle);
+        this.contextFramesSelect = document.createElement("select");
+        this.contextFramesSelect.className = "secourses-refgal-contextframes";
+        this.contextFramesSelect.setAttribute("aria-label", "Continuation context frames");
+        this.contextFramesSelect.title = "Video frames used as continuation context: 1 preserves the original behavior; 5, 22, 39, and 56 use native multi-frame guides.";
+        for (const value of [1, 5, 22, 39, 56]) {
+            const option = document.createElement("option");
+            option.value = String(value);
+            option.textContent = String(value);
+            this.contextFramesSelect.appendChild(option);
+        }
+        this.continuationControls.append(this.lastFrameToggle, this.contextFramesSelect);
+        this.continuationRow.append(this.tokenMeter.element, this.continuationControls);
 
         this.fileInput = document.createElement("input");
         this.fileInput.type = "file";
@@ -621,13 +636,23 @@ class ReferenceGalleryUI {
                 this.continueLastFrameWidget.value = this.lastFrameCheckbox.checked;
                 this.continueLastFrameWidget.callback?.(this.continueLastFrameWidget.value);
             }
+            this.contextFramesSelect.disabled = !this.lastFrameCheckbox.checked;
             this.node.setDirtyCanvas(true, true);
+            this.scheduleTokenEstimate();
         });
         this.lastFrameToggle.addEventListener("click", (event) => {
             if (event.target === this.lastFrameCheckbox) return;
             event.preventDefault();
             this.lastFrameCheckbox.checked = !this.lastFrameCheckbox.checked;
             this.lastFrameCheckbox.dispatchEvent(new Event("change", { bubbles: true }));
+        });
+        this.contextFramesSelect.addEventListener("change", () => {
+            if (this.contextFramesWidget) {
+                this.contextFramesWidget.value = this.contextFramesSelect.value;
+                this.contextFramesWidget.callback?.(this.contextFramesWidget.value);
+            }
+            this.node.setDirtyCanvas(true, true);
+            this.scheduleTokenEstimate();
         });
         this.fileInput.addEventListener("change", async () => {
             await this.addFiles([...this.fileInput.files]);
@@ -722,6 +747,8 @@ class ReferenceGalleryUI {
         this.mergeCheckbox.checked = mergeValue === true || mergeValue === "true" || mergeValue === 1;
         const continuationValue = this.continueLastFrameWidget?.value;
         this.lastFrameCheckbox.checked = continuationValue === true || continuationValue === "true" || continuationValue === 1;
+        const contextValue = String(this.contextFramesWidget?.value ?? "1");
+        this.contextFramesSelect.value = ["1", "5", "22", "39", "56"].includes(contextValue) ? contextValue : "1";
         this.updateMergeAvailability();
         this.updateContinuationAvailability();
         if (hydratePrompt) {
@@ -765,8 +792,9 @@ class ReferenceGalleryUI {
     updateContinuationAvailability() {
         const output = this.node.outputs?.find((item) => item.name === "continue_batch_with_last_frame");
         const available = Boolean(output?.links?.length);
-        this.lastFrameToggle.hidden = !available;
+        this.continuationControls.hidden = !available;
         this.lastFrameCheckbox.disabled = !available;
+        this.contextFramesSelect.disabled = !available || !this.lastFrameCheckbox.checked;
         this.scheduleTokenEstimate();
     }
 

@@ -275,10 +275,13 @@ export const NODE_EVALUATORS = {
     SECoursesLoadImage: async (ctx, node, slot) => (slot === 0 ? imageDescriptor(await ctx.input(node, "image")) : undefined),
     SECoursesOptionalImage: async (ctx, node) => imageDescriptor(await ctx.input(node, "image")),
     SECoursesBatchContinuationFrame: async (ctx, node) => {
-        // Folder-batch continuation frames are unknowable ahead of time; normal runs
-        // pass the optional init image through as the Auto adapter's starting frame.
         const pack = await ctx.input(node, "references");
-        if (pack?.batchActive) return null;
+        if (pack?.batchActive) {
+            const enabled = asBool(await ctx.input(node, "continue_batch_with_last_frame")) === true;
+            if (!enabled) return null;
+            const frames = asNumber(await ctx.input(node, "continuation_context_frames")) ?? 1;
+            return { kind: "continuation", frames };
+        }
         return (await ctx.input(node, "init_image")) ?? null;
     },
     LoadAudio: async (ctx, node) => audioDescriptor(await ctx.input(node, "audio")),
@@ -316,6 +319,7 @@ export const NODE_EVALUATORS = {
         if (slot === 2) return batchFolder !== "";
         if (slot === 3) return asBool(await ctx.input(node, "merge_batch_videos")) === true && batchFolder !== "";
         if (slot === 4) return asBool(await ctx.input(node, "continue_batch_with_last_frame")) === true && batchFolder !== "";
+        if (slot === 5) return asNumber(await ctx.input(node, "continuation_context_frames")) ?? 1;
         const describe = async (entries, kind) => Promise.all(entries.map(async (entry) => {
             const info = await mediaInfo(entry.file);
             const base = { name: entry.name || entry.file, trimStart: entry.trim_start ?? null, trimEnd: entry.trim_end ?? null };
@@ -548,6 +552,10 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
     if (typeof override === "string" && override.trim()) prompt = override;
     const extras = await downstreamConditioningExtras(resolver, id, active);
     const continuation = mode === "text" ? await resolver.input(node, "first_frame") : await resolver.input(node, "continuation_frame");
+    const continuationFrames = continuation?.kind === "continuation"
+        ? Math.max(1, Math.trunc(Number(continuation.frames) || 1))
+        : continuation ? 1 : 0;
+    const multiFrameContext = continuationFrames > 1 ? continuationFrames : 0;
     const hasRefs = Boolean(pack && pack.images.length + pack.videos.length + pack.audios.length > 0);
     const useRefs = mode === "refs" || (mode === "auto" && hasRefs);
     let spec;
@@ -559,20 +567,22 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
         const audios = selectMentioned(prompt, pack?.audios ?? [], H3.MAX_AUDIOS, "audio");
         spec = {
             width: canvas.width, height: canvas.height, frames: canvas.length, prompt,
-            refImages: continuation ? [...images, { width: canvas.width, height: canvas.height }].slice(0, H3.MAX_IMAGES) : images,
+            refImages: continuationFrames === 1 ? [...images, { width: canvas.width, height: canvas.height }].slice(0, H3.MAX_IMAGES) : images,
             refVideos: videos, refAudios: audios,
             refImageSize: (await resolver.input(node, "ref_image_size")) || "match",
             maxSeconds: pack?.maxSeconds ?? 15, audioOnly,
-            keyframeImages: extras.keyframeImages, audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "secourses",
+            keyframeImages: extras.keyframeImages, keyframeVideoFrames: multiFrameContext,
+            audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "secourses",
         };
         label = audioOnly ? "audio only with references" : "reference to video";
     } else {
         spec = {
             width: canvas.width, height: canvas.height, frames: canvas.length, prompt,
-            keyframeImages: (continuation ? 1 : 0) + extras.keyframeImages,
+            keyframeImages: (continuationFrames === 1 ? 1 : 0) + extras.keyframeImages,
+            keyframeVideoFrames: multiFrameContext,
             audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "secourses",
         };
-        label = continuation ? "image to video" : "text to video";
+        label = continuationFrames ? "image to video" : "text to video";
     }
     return { ...canvas, approximate: !pack, spec, label };
 }

@@ -40,6 +40,7 @@ import re
 import threading
 import time
 import warnings
+from collections import deque
 from pathlib import Path
 
 try:
@@ -75,6 +76,7 @@ BATCH_MEDIA_EXTENSIONS = BATCH_IMAGE_EXTENSIONS | BATCH_VIDEO_EXTENSIONS | BATCH
 BATCH_MAX_PROMPTS = 1000
 BATCH_MAX_PROMPT_BYTES = 1024 * 1024
 BATCH_SESSION_TTL_SECONDS = 6 * 60 * 60
+CONTINUATION_CONTEXT_FRAMES = (1, 5, 22, 39, 56)
 
 _BATCH_SESSION_LOCK = threading.Lock()
 _BATCH_OUTPUT_SESSIONS = {"video": {}, "audio": {}}
@@ -1035,39 +1037,129 @@ def _video_from_saved_output(saved):
     return InputImpl.VideoFromFile(saved["fullpath"])
 
 
-def _decode_last_video_frame(path):
+def _continuation_context_frame_count(value):
+    try:
+        frame_count = int(value)
+    except (TypeError, ValueError) as error:
+        raise ValueError(
+            "Continuation context frames must be one of 1, 5, 22, 39, or 56."
+        ) from error
+    if frame_count not in CONTINUATION_CONTEXT_FRAMES:
+        raise ValueError(
+            "Continuation context frames must be one of 1, 5, 22, 39, or 56."
+        )
+    return frame_count
+
+
+def _decode_last_video_frames(path, frame_count):
     import av
     import torch
 
+    requested = _continuation_context_frame_count(frame_count)
+
     def decode(container, stream):
-        last = None
+        frames = deque(maxlen=requested)
         for frame in container.decode(streams=stream.index):
-            last = frame
-        return last
+            pixels = frame.to_ndarray(format="rgb24").copy()
+            frames.append(torch.from_numpy(pixels))
+        return list(frames)
 
     path = str(path)
+    sought = False
     with av.open(path, mode="r") as container:
         if not container.streams.video:
             raise ValueError(f"Previous folder-batch output has no video stream: {path}")
         stream = container.streams.video[0]
         if stream.duration is not None and stream.time_base is not None:
-            two_seconds = max(1, round(2.0 / float(stream.time_base)))
-            target = int(stream.start_time or 0) + max(0, int(stream.duration) - two_seconds)
+            try:
+                fps = float(stream.average_rate) if stream.average_rate else 24.0
+            except (TypeError, ValueError, ZeroDivisionError):
+                fps = 24.0
+            lookback_seconds = max(2.0, requested / max(fps, 1.0) + 1.0)
+            lookback = max(1, round(lookback_seconds / float(stream.time_base)))
+            target = int(stream.start_time or 0) + max(0, int(stream.duration) - lookback)
             container.seek(target, stream=stream, any_frame=False, backward=True)
-        frame = decode(container, stream)
+            sought = target > int(stream.start_time or 0)
+        frames = decode(container, stream)
 
-    if frame is None:
+    if len(frames) < requested and sought:
         with av.open(path, mode="r") as container:
             if not container.streams.video:
                 raise ValueError(f"Previous folder-batch output has no video stream: {path}")
-            frame = decode(container, container.streams.video[0])
-    if frame is None:
-        raise ValueError(f"Previous folder-batch output has no decodable video frame: {path}")
+            frames = decode(container, container.streams.video[0])
+    if len(frames) < requested:
+        raise ValueError(
+            f"Previous folder-batch output has {len(frames)} decodable video frame(s), "
+            f"but {requested} context frames were requested: {path}"
+        )
 
-    pixels = frame.to_ndarray(format="rgb24").copy()
-    image = torch.from_numpy(pixels).to(dtype=torch.float32)
+    image = torch.stack(frames, dim=0).to(dtype=torch.float32)
     image.mul_(1.0 / 255.0)
-    return image.unsqueeze(0)
+    return image
+
+
+def _decode_last_video_frame(path):
+    return _decode_last_video_frames(path, 1)
+
+
+def _continuation_frames_to_trim(pack, enabled, frame_count):
+    if not enabled:
+        return 0
+    requested = _continuation_context_frame_count(frame_count)
+    if requested == 1 or not isinstance(pack, dict) or pack.get("init_image"):
+        return 0
+    item = _sequential_batch_item(pack)
+    if item is None or item[1] == 1:
+        return 0
+    return requested
+
+
+def _trim_video_start(video, frame_count):
+    from comfy_api.latest import Input, InputImpl, Types
+
+    trim_frames = int(frame_count)
+    if trim_frames <= 0:
+        return video
+    components = video.get_components()
+    images = components.images
+    if images.ndim != 4 or images.shape[0] <= trim_frames:
+        available = int(images.shape[0]) if getattr(images, "ndim", 0) else 0
+        raise ValueError(
+            f"The generated continuation has {available} frame(s), so its first "
+            f"{trim_frames} context frames cannot be removed. Increase the generation duration."
+        )
+
+    audio = components.audio
+    if audio is not None and isinstance(audio, dict):
+        waveform = audio.get("waveform")
+        sample_rate = int(audio.get("sample_rate", 0) or 0)
+        fps = float(components.frame_rate)
+        if waveform is not None and getattr(waveform, "ndim", 0) == 3 and sample_rate > 0 and fps > 0:
+            start_sample = max(0, round(trim_frames * sample_rate / fps))
+            if start_sample < waveform.shape[-1]:
+                audio = Input.Audio({
+                    **audio,
+                    "waveform": waveform[..., start_sample:].contiguous(),
+                    "sample_rate": sample_rate,
+                })
+            else:
+                audio = None
+
+    alpha = getattr(components, "alpha", None)
+    if alpha is not None:
+        alpha = alpha[trim_frames:].contiguous()
+    trimmed_components = Types.VideoComponents(
+        images=images[trim_frames:].contiguous(),
+        frame_rate=components.frame_rate,
+        audio=audio,
+        alpha=alpha,
+        metadata=getattr(components, "metadata", None),
+    )
+    return InputImpl.VideoFromComponents(
+        trimmed_components,
+        bit_depth=video.get_bit_depth(),
+        color_space=video.get_color_space(),
+    )
 
 
 def _concatenate_batch_audio(audios):
@@ -1852,7 +1944,11 @@ class SECoursesReferenceGallery:
                 }),
                 "continue_batch_with_last_frame": ("BOOLEAN", {
                     "default": False,
-                    "tooltip": "When Folder batch is active, use the last frame of each completed video as the next prompt's starting image. The first prompt uses no continuation frame.",
+                    "tooltip": "When Folder batch is active, continue each prompt from the selected final video-frame context of the preceding completed video. The first prompt uses no continuation frames.",
+                }),
+                "continuation_context_frames": ([str(value) for value in CONTINUATION_CONTEXT_FRAMES], {
+                    "default": "1",
+                    "tooltip": "Number of preceding video frames used as context. One preserves the original last-frame behavior; 5, 22, 39, and 56 use MiniMax H3's native multi-frame guide lengths.",
                 }),
                 "match_batch_init_media": ("BOOLEAN", {
                     "default": False,
@@ -1869,18 +1965,19 @@ class SECoursesReferenceGallery:
         }
 
     CATEGORY = "SECourses/references"
-    RETURN_TYPES = (REF_PACK_TYPE, "STRING", "BOOLEAN", "BOOLEAN", "BOOLEAN")
+    RETURN_TYPES = (REF_PACK_TYPE, "STRING", "BOOLEAN", "BOOLEAN", "BOOLEAN", "INT")
     RETURN_NAMES = (
         "references", "prompt", "folder_batch_active", "merge_batch_videos",
-        "continue_batch_with_last_frame",
+        "continue_batch_with_last_frame", "continuation_context_frames",
     )
-    OUTPUT_IS_LIST = (True, True, True, True, True)
+    OUTPUT_IS_LIST = (True, True, True, True, True, True)
     OUTPUT_TOOLTIPS = (
         "Every gallery reference bundled in upload order, ready for a model adapter node such as 'MiniMax H3 References (Gallery)'.",
         "The prompt exactly as typed, or one output per naturally ordered .txt file when Folder batch is active.",
         "True for folder-batch items and false for the normal single prompt.",
         "True for every sequential folder job when the adjacent merge toggle is enabled.",
-        "True for every sequential folder job when last-frame continuation is enabled.",
+        "True for every sequential folder job when video-frame continuation is enabled.",
+        "Selected continuation context length: 1, 5, 22, 39, or 56 video frames.",
     )
     FUNCTION = "collect"
     DESCRIPTION = (
@@ -1893,7 +1990,7 @@ class SECoursesReferenceGallery:
         ".txt prompt, saving each output before the next job starts. Compatible video presets can match a prompt's "
         "basename to an init image, init audio, or both; other media remains reference material. Media comes only "
         "from the prompt's own directory, with gallery attachments as fallback. Optional toggles merge after the final "
-        "job or feed each completed video's final frame into the next prompt. A prompt filename ending in "
+        "job or feed 1, 5, 22, 39, or 56 of each completed video's final frames into the next prompt. A prompt filename ending in "
         "'_<integer>.txt' overrides that item's output duration in compatible presets."
     )
 
@@ -1910,9 +2007,11 @@ class SECoursesReferenceGallery:
         batch_item_index=-1,
         batch_item_count=0,
         match_batch_init_media=False,
+        continuation_context_frames="1",
     ):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
+        context_frames = _continuation_context_frame_count(continuation_context_frames)
         folder_batch = _collect_folder_batch(
             batch_folder, manifest, video_fps, max_seconds, bool(match_batch_init_media)
         )
@@ -1954,7 +2053,8 @@ class SECoursesReferenceGallery:
                 )
             merge_flags = [bool(merge_batch_videos)] * len(packs)
             continuation_flags = [bool(continue_batch_with_last_frame)] * len(packs)
-            return (packs, prompts, [True] * len(packs), merge_flags, continuation_flags)
+            context_values = [context_frames] * len(packs)
+            return (packs, prompts, [True] * len(packs), merge_flags, continuation_flags, context_values)
 
         pack = {
             "version": 2,
@@ -1970,7 +2070,7 @@ class SECoursesReferenceGallery:
             (("image(s)", pack["images"]), ("video(s)", pack["videos"]), ("audio", pack["audios"]))
         )
         print(f"[SECoursesReferenceGallery] prepared {summary} for target-aware decoding", flush=True)
-        return ([pack], [prompt], [False], [False], [False])
+        return ([pack], [prompt], [False], [False], [False], [context_frames])
 
     @classmethod
     def IS_CHANGED(
@@ -1986,6 +2086,7 @@ class SECoursesReferenceGallery:
         batch_item_index=-1,
         batch_item_count=0,
         match_batch_init_media=False,
+        continuation_context_frames="1",
     ):
         digest = hashlib.sha256()
         digest.update(
@@ -1998,6 +2099,7 @@ class SECoursesReferenceGallery:
                     str(batch_folder),
                     bool(merge_batch_videos),
                     bool(continue_batch_with_last_frame),
+                    _continuation_context_frame_count(continuation_context_frames),
                     bool(match_batch_init_media),
                     str(batch_run_id),
                     int(batch_item_index),
@@ -2045,9 +2147,14 @@ class SECoursesReferenceGallery:
         batch_item_index=-1,
         batch_item_count=0,
         match_batch_init_media=False,
+        continuation_context_frames="1",
     ):
         try:
             manifest = _parse_manifest(references)
+        except ValueError as error:
+            return str(error)
+        try:
+            _continuation_context_frame_count(continuation_context_frames)
         except ValueError as error:
             return str(error)
         try:
@@ -2126,10 +2233,17 @@ class SECoursesBatchContinuationFrame:
                 }),
                 "continue_batch_with_last_frame": ("BOOLEAN", {
                     "forceInput": True,
-                    "tooltip": "Connect the gallery's last-frame continuation output.",
+                    "tooltip": "Connect the gallery's Continue From Last Video Frames output.",
                 }),
             },
             "optional": {
+                "continuation_context_frames": ("INT", {
+                    "forceInput": True,
+                    "default": 1,
+                    "min": 1,
+                    "max": 56,
+                    "tooltip": "Connect the gallery's 1, 5, 22, 39, or 56-frame context output.",
+                }),
                 "init_image": ("IMAGE", {
                     "tooltip": "Optional starting image for normal (non folder-batch) runs, passed through as "
                                "first_frame so one Auto adapter covers init image generation too. FL2VA uses it "
@@ -2145,27 +2259,38 @@ class SECoursesBatchContinuationFrame:
     RETURN_NAMES = ("first_frame",)
     FUNCTION = "load"
     DESCRIPTION = (
-        "Returns no image for the first folder prompt, then decodes only the final frame of each immediately "
-        "preceding saved video for use as the next MiniMax H3 starting image. For normal (non folder-batch) "
+        "Returns no image for the first folder prompt, then decodes the selected 1, 5, 22, 39, or 56 final "
+        "frames of each immediately preceding saved video for use as MiniMax H3 context. For normal (non folder-batch) "
         "runs the optional init_image input is passed through instead, so the same preset offers an optional "
         "starting image."
     )
 
-    def load(self, references, continue_batch_with_last_frame, init_image=None):
+    def load(
+        self,
+        references,
+        continue_batch_with_last_frame,
+        continuation_context_frames=1,
+        init_image=None,
+    ):
+        context_frames = _continuation_context_frame_count(continuation_context_frames)
         path = _previous_batch_video(references, bool(continue_batch_with_last_frame))
         if path is None:
             if init_image is not None and not (isinstance(references, dict) and references.get("batch")):
                 print("[SECoursesBatchContinuationFrame] using the connected init image", flush=True)
-                return ({"image": init_image},)
+                return ({"image": init_image, "context_frames": 0},)
             # A literal None output is treated as an unavailable dependency by
             # ComfyUI's graph executor. Keep the optional value concrete so the
             # first batch item can continue through the Auto adapter normally.
-            return ({"image": None},)
+            return ({"image": None, "context_frames": 0},)
         print(
-            f"[SECoursesBatchContinuationFrame] using previous final frame from {path}",
+            f"[SECoursesBatchContinuationFrame] using previous final {context_frames} "
+            f"video frame(s) from {path}",
             flush=True,
         )
-        return ({"image": _decode_last_video_frame(path)},)
+        return ({
+            "image": _decode_last_video_frames(path, context_frames),
+            "context_frames": context_frames,
+        },)
 
 
 class SECoursesBatchVideoSaveMerge:
@@ -2187,7 +2312,14 @@ class SECoursesBatchVideoSaveMerge:
             "optional": {
                 "continue_batch_with_last_frame": ("BOOLEAN", {
                     "forceInput": True,
-                    "tooltip": "Connect the gallery's last-frame continuation output so each saved video becomes the next queued prompt's starting frame.",
+                    "tooltip": "Connect the gallery's Continue From Last Video Frames output so each saved video becomes the next queued prompt's context.",
+                }),
+                "continuation_context_frames": ("INT", {
+                    "forceInput": True,
+                    "default": 1,
+                    "min": 1,
+                    "max": 56,
+                    "tooltip": "Connect the gallery's 1, 5, 22, 39, or 56-frame context output. Multi-frame replay is removed from the saved result.",
                 }),
             },
             "hidden": {
@@ -2225,6 +2357,7 @@ class SECoursesBatchVideoSaveMerge:
         merge_batch_videos,
         filename_prefix,
         continue_batch_with_last_frame=None,
+        continuation_context_frames=None,
         prompt=None,
         extra_pnginfo=None,
     ):
@@ -2254,8 +2387,36 @@ class SECoursesBatchVideoSaveMerge:
             )
         if not continuation_flags:
             continuation_flags = [False] * len(packs)
+
+        if isinstance(continuation_context_frames, (list, tuple)):
+            context_values = list(continuation_context_frames)
+        elif continuation_context_frames is None:
+            context_values = []
+        else:
+            context_values = [continuation_context_frames]
+        if len(context_values) == 1 and len(packs) > 1:
+            context_values *= len(packs)
+        if context_values and len(context_values) != len(packs):
+            raise ValueError(
+                "Folder batch video save received a different number of context-frame values "
+                f"({len(context_values)}) and reference packs ({len(packs)})."
+            )
+        if not context_values:
+            context_values = [1] * len(packs)
         saved = []
-        for clip, pack, continue_enabled in zip(videos, packs, continuation_flags):
+        for clip, pack, continue_enabled, context_value in zip(
+            videos, packs, continuation_flags, context_values
+        ):
+            trim_frames = _continuation_frames_to_trim(
+                pack, bool(continue_enabled), context_value
+            )
+            if trim_frames:
+                clip = _trim_video_start(clip, trim_frames)
+                print(
+                    f"[SECoursesBatchVideoSaveMerge] removed {trim_frames} replayed context "
+                    "frame(s) from the saved continuation",
+                    flush=True,
+                )
             result = _save_video_output(clip, prefix, prompt_value, extra_value)
             saved.append(result)
             _record_batch_video_for_continuation(
@@ -2845,7 +3006,7 @@ class SECoursesMiniMaxH3Auto:
         optional = dict(inputs.get("optional", {}))
         optional.pop("audio_only_mode", None)
         optional["continuation_frame"] = (OPTIONAL_IMAGE_TYPE, {
-            "tooltip": "Optional value from MiniMax H3 Previous Batch Final Frame.",
+            "tooltip": "Optional value from MiniMax H3 Previous Batch Video Frames.",
         })
         return {**inputs, "optional": optional}
 
@@ -2874,18 +3035,36 @@ class SECoursesMiniMaxH3Auto:
     ):
         if not isinstance(references, dict):
             raise ValueError("The references input must come from a SECourses Reference Gallery node.")
-        if isinstance(continuation_frame, dict) and set(continuation_frame).issubset({"image"}):
-            continuation_frame = continuation_frame.get("image")
+        continuation_context_frames = 1 if continuation_frame is not None else 0
+        if isinstance(continuation_frame, dict) and set(continuation_frame).issubset(
+            {"image", "context_frames"}
+        ):
+            wrapper = continuation_frame
+            continuation_frame = wrapper.get("image")
+            raw_context_frames = wrapper.get(
+                "context_frames", 1 if continuation_frame is not None else 0
+            )
+            continuation_context_frames = (
+                0 if int(raw_context_frames or 0) == 0
+                else _continuation_context_frame_count(raw_context_frames)
+            )
         init_image = references.get("init_image")
         if init_image:
             continuation_frame = _load_reference_image(
                 _resolve_reference_entry(init_image), int(width), int(height)
             )
+            continuation_context_frames = 0
             print(
                 f"[SECoursesMiniMaxH3Auto] using folder-batch init image '{init_image['name']}'.",
                 flush=True,
             )
         has_references = any(references.get(kind) for kind in ("images", "videos", "audios"))
+        native_video_context = continuation_frame is not None and continuation_context_frames > 1
+        if native_video_context and int(length) <= continuation_context_frames:
+            raise ValueError(
+                f"The generated video must be longer than its {continuation_context_frames}-frame "
+                "continuation context. Increase the duration or choose a shorter context."
+            )
         if has_references:
             positive, latent = SECoursesMiniMaxH3References().encode(
                 clip=clip,
@@ -2897,7 +3076,7 @@ class SECoursesMiniMaxH3Auto:
                 length=length,
                 ref_image_size=ref_image_size,
                 prompt_override=prompt_override,
-                continuation_frame=continuation_frame,
+                continuation_frame=None if native_video_context else continuation_frame,
             )
         else:
             positive, latent = SECoursesMiniMaxH3TextOnly().encode(
@@ -2908,7 +3087,32 @@ class SECoursesMiniMaxH3Auto:
                 height=height,
                 length=length,
                 prompt_override=prompt_override,
-                first_frame=continuation_frame,
+                first_frame=None if native_video_context else continuation_frame,
+            )
+        if native_video_context:
+            try:
+                import comfy.model_management as model_management
+                from comfy_extras.nodes_minimax_h3 import MiniMaxH3AddGuide
+            except ImportError:
+                raise RuntimeError(
+                    "MiniMax H3 multi-frame guides were not found. Update ComfyUI to a version that ships "
+                    "MiniMaxH3AddGuide in comfy_extras/nodes_minimax_h3.py."
+                )
+            # A previous folder item can leave the H3 diffusion model resident.
+            # Release it before the video VAE encodes the larger context clip.
+            model_management.unload_all_models()
+            output = MiniMaxH3AddGuide.execute(
+                positive=positive,
+                vae=vae,
+                latent=latent,
+                image=continuation_frame,
+                frame_idx=0,
+            )
+            positive = output.args[0]
+            print(
+                f"[SECoursesMiniMaxH3Auto] anchored {continuation_context_frames} previous "
+                "video frames with MiniMax H3's native guide.",
+                flush=True,
             )
         return positive, latent, has_references
 
