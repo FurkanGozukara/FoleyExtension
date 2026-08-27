@@ -86,7 +86,16 @@ _BATCH_CONTINUATION_SESSIONS = {}
 
 # One entry per '@' alias, canonicalized: @img2 == @image2, @pic1 == @picture1 == @image1.
 TOKEN_MATCHER = re.compile(
-    r"(?<![0-9A-Za-z_@])@(?P<type>image|img|picture|pic|video|vid|audio|aud|sound)#?(?P<num>\d{1,2})(?![0-9A-Za-z])",
+    r"(?<![0-9A-Za-z_@])@[ \t]*(?P<type>image|img|picture|pic|video|vid|audio|aud|sound)"
+    r"[ \t]*#?[ \t]*(?P<num>\d{1,2})(?![0-9A-Za-z])",
+    re.IGNORECASE,
+)
+
+# MiniMax's native labels are case-sensitive at tokenization time. Accept the
+# common aliases and harmless spacing variations, then emit one exact form.
+NATIVE_TOKEN_MATCHER = re.compile(
+    r"<[ \t]*(?P<type>image|img|picture|pic|video|vid|audio|aud|sound)"
+    r"[ \t]*#?[ \t]*(?P<num>\d{1,2})[ \t]*>",
     re.IGNORECASE,
 )
 
@@ -96,6 +105,31 @@ _CANONICAL_TYPE = {
     "audio": "audio", "aud": "audio", "sound": "audio",
 }
 
+_NATIVE_LABEL = {
+    "image": "Picture",
+    "video": "Video",
+    "audio": "Audio",
+}
+
+
+def _canonical_reference_type(value):
+    # Python's Unicode case-insensitive regex also accepts Turkish dotted and
+    # dotless I; fold those spellings before looking up the ASCII token alias.
+    value = value.replace("\u0130", "I").replace("\u0131", "i").replace("\u017f", "s").lower()
+    return _CANONICAL_TYPE[value]
+
+
+def normalize_native_reference_tokens(prompt):
+    """Canonicalize native/legacy reference labels without changing their index."""
+    if not prompt or "<" not in prompt:
+        return prompt
+
+    def replace(match):
+        kind = _canonical_reference_type(match.group("type"))
+        return f"<{_NATIVE_LABEL[kind]} {int(match.group('num'))}>"
+
+    return NATIVE_TOKEN_MATCHER.sub(replace, prompt)
+
 
 def translate_reference_tokens(prompt, image_count, video_count, audio_count, audio_label_offset,
                                audio_number_map=None, image_number_map=None, video_number_map=None):
@@ -103,10 +137,11 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
 
     Audio labels index video soundtracks first, so standalone audio tokens are
     shifted by ``audio_label_offset`` (the number of videos that carry sound).
-    Legacy '<Picture 1>' labels typed directly in the prompt pass through
-    unchanged. Tokens that point at a missing reference (eg '@image3' with two
-    images attached) are silently omitted, together with one adjacent space, so
-    a stale token left in the prompt never blocks execution.
+    Native labels typed directly in the prompt are normalized case-insensitively
+    (eg '<picture1>' becomes '<Picture 1>') and otherwise keep their index.
+    Tokens that point at a missing reference (eg '@image3' with two images
+    attached) are silently omitted, together with one adjacent space, so a stale
+    token left in the prompt never blocks execution.
 
     The ``*_number_map`` arguments renumber tokens when the gallery holds more
     files of that modality than the model cap and only the prompt-mentioned
@@ -114,7 +149,7 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
     first standalone audio label, and tokens missing from their map are omitted
     like stale tokens.
     """
-    if not prompt or "@" not in prompt:
+    if not prompt:
         return prompt
 
     pieces = []
@@ -123,7 +158,7 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
     for match in TOKEN_MATCHER.finditer(prompt):
         pieces.append(prompt[last:match.start()])
         last = match.end()
-        kind = _CANONICAL_TYPE[match.group("type").lower()]
+        kind = _canonical_reference_type(match.group("type"))
         number = int(match.group("num"))
         label, count, offset, number_map = {
             "image": ("Picture", image_count, 0, image_number_map),
@@ -147,7 +182,7 @@ def translate_reference_tokens(prompt, image_count, video_count, audio_count, au
             + ", ".join(omitted),
             flush=True,
         )
-    return "".join(pieces)
+    return normalize_native_reference_tokens("".join(pieces))
 
 
 def translate_audio_only_reference_tokens(prompt, image_count, video_count, audio_count,
@@ -160,7 +195,7 @@ def translate_audio_only_reference_tokens(prompt, image_count, video_count, audi
     prompt-mentioned subset when the gallery holds more files of a modality
     than the model cap.
     """
-    if not prompt or "@" not in prompt:
+    if not prompt:
         return prompt
 
     pieces = []
@@ -169,7 +204,7 @@ def translate_audio_only_reference_tokens(prompt, image_count, video_count, audi
     for match in TOKEN_MATCHER.finditer(prompt):
         pieces.append(prompt[last:match.start()])
         last = match.end()
-        kind = _CANONICAL_TYPE[match.group("type").lower()]
+        kind = _canonical_reference_type(match.group("type"))
         number = int(match.group("num"))
         label, count, offset, number_map = {
             "image": ("Picture", image_count, 0, image_number_map),
@@ -193,7 +228,7 @@ def translate_audio_only_reference_tokens(prompt, image_count, video_count, audi
             + ", ".join(omitted),
             flush=True,
         )
-    return "".join(pieces)
+    return normalize_native_reference_tokens("".join(pieces))
 
 
 def select_prompt_media_references(prompt, entries, max_count, kind):
@@ -215,7 +250,7 @@ def select_prompt_media_references(prompt, entries, max_count, kind):
 
     mentioned = []
     for match in TOKEN_MATCHER.finditer(prompt or ""):
-        if _CANONICAL_TYPE[match.group("type").lower()] != kind:
+        if _canonical_reference_type(match.group("type")) != kind:
             continue
         number = int(match.group("num"))
         if 1 <= number <= len(entries) and number not in mentioned:
@@ -2042,7 +2077,7 @@ class SECoursesReferenceGallery:
                     "multiline": True,
                     "default": "",
                     "dynamicPrompts": True,
-                    "tooltip": "Prompt for the generation. Use the gallery's + Prompt control to add sequential prompts. Type '@' to reference gallery attachments, eg '@image1', '@video1', '@audio1' (aliases like '@img1', '@pic1', '@vid1', '@sound1' also work).",
+                    "tooltip": "Prompt for the generation. Use the gallery's + Prompt control to add sequential prompts. Type '@' to reference gallery attachments, eg '@image1', '@video1', '@audio1' (case-insensitive aliases also work). Native labels such as '<picture1>' are normalized automatically.",
                 }),
                 "references": ("STRING", {
                     "multiline": False,

@@ -1539,7 +1539,7 @@ class ReferenceGalleryUI {
     renderOverlay(caretIndex = null, editor = this.promptEditors[0]) {
         const text = editor.textarea.value;
         const counts = this.counts();
-        const tokenRegex = /(?<![\w@])@(image|img|picture|pic|video|vid|audio|aud|sound)#?(\d{1,2})(?![0-9a-zA-Z])|<(Picture|Video|Audio)[ ]?(\d{1,2})>/gi;
+        const tokenRegex = /(?<![\w@])@[ \t]*(image|img|picture|pic|video|vid|audio|aud|sound)[ \t]*#?[ \t]*(\d{1,2})(?![0-9a-zA-Z])|<[ \t]*(image|img|picture|pic|video|vid|audio|aud|sound)[ \t]*#?[ \t]*(\d{1,2})[ \t]*>/gi;
         let html = "";
         let last = 0;
         let match;
@@ -1563,8 +1563,7 @@ class ReferenceGalleryUI {
                 type = ALIAS_TO_TYPE[match[1].toLowerCase()];
                 n = parseInt(match[2]);
             } else {
-                const label = match[3].toLowerCase();
-                type = label === "picture" ? "image" : label;
+                type = ALIAS_TO_TYPE[match[3].toLowerCase()];
                 n = parseInt(match[4]);
                 legacyAudio = type === "audio";
             }

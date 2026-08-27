@@ -38,8 +38,10 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     shared RAM budgets prevent high-megapixel attachments from causing an OOM.
     Inputs above 100 MP per image or 40 MP per video frame fail with a clear
     validation error instead of attempting an unsafe allocation.
-  - Token aliases: `@img1`, `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`,
-    and `@image#1` all work.
+  - Token aliases are case-insensitive: `@image1`, `@IMAGE1`, `@img1`,
+    `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`, and `@image#1` all
+    work. Harmless spaces are accepted too, then the backend emits the exact
+    native label MiniMax expects.
   - **Inline prompt chain** uses the compact *+ Prompt* button to add prompt
     boxes only when they are needed. The boxes run from top to bottom as
     separate queued jobs, share the gallery references and normal duration,
@@ -103,8 +105,10 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   labels the model expects (audio labels are offset past video soundtracks
   automatically) and then runs ComfyUI's native `MiniMaxH3ReferenceToVideo`
   conditioning, so upstream improvements apply automatically. Outputs
-  `positive` conditioning plus the AV latent. Legacy `<Picture 1>` labels typed
-  directly still pass through unchanged. Its audio-only mode extracts each
+  `positive` conditioning plus the AV latent. Native labels typed directly are
+  normalized at the backend, so `<Picture 1>`, `<picture1>`, `<PICTURE 1>`, and
+  common aliases such as `<image 1>` all become the exact `<Picture 1>` form.
+  Its audio-only mode extracts each
   reference video's soundtrack without decoding or conditioning on the video
   frames; in that mode `@video1` maps to `<Audio 1>`.
 - **Load Video Soundtrack (Base64, No Frames)** and **Trim Reference Audio**
