@@ -36,6 +36,26 @@ export function folderBatchTargets(promptOutput) {
         .filter((target) => target.batchFolder.length > 0);
 }
 
+export function promptChainTargets(promptOutput) {
+    return Object.entries(promptOutput ?? {})
+        .filter(([, node]) => node?.class_type === GALLERY_CLASS)
+        .map(([nodeId, node]) => {
+            let manifest = {};
+            try {
+                manifest = JSON.parse(node.inputs?.references || "{}");
+            } catch (error) {
+                return null;
+            }
+            const additional = Array.isArray(manifest.prompts) ? manifest.prompts : [];
+            if (!additional.length) return null;
+            return {
+                nodeId,
+                prompts: [String(node.inputs?.prompt ?? ""), ...additional],
+            };
+        })
+        .filter(Boolean);
+}
+
 export function supportsSequentialFolderQueue(promptOutput) {
     const classes = new Set(
         Object.values(promptOutput ?? {}).map((node) => node?.class_type),
@@ -49,10 +69,10 @@ export function buildSequentialBatchPlan(promptCount, repetitions, makeRunId) {
     const count = Number(promptCount);
     const runs = Number(repetitions);
     if (!Number.isInteger(count) || count < 1) {
-        throw new Error("Folder batch inspection returned an invalid prompt count.");
+        throw new Error("Sequential processing returned an invalid prompt count.");
     }
     if (!Number.isInteger(runs) || runs < 1) {
-        throw new Error("Folder batch queue count must be a positive integer.");
+        throw new Error("Sequential queue count must be a positive integer.");
     }
     const plan = [];
     for (let repetition = 0; repetition < runs; repetition++) {
@@ -72,11 +92,22 @@ export function injectSequentialBatchItem(promptOutput, targetNodeIds, item) {
     for (const nodeId of targetNodeIds) {
         const node = promptOutput?.[nodeId];
         if (!node?.inputs) {
-            throw new Error(`Folder batch gallery node ${nodeId} is missing from the queued prompt.`);
+            throw new Error(`Sequential gallery node ${nodeId} is missing from the queued prompt.`);
         }
         node.inputs.batch_run_id = item.runId;
         node.inputs.batch_item_index = item.itemIndex;
         node.inputs.batch_item_count = item.itemCount;
     }
     return promptOutput;
+}
+
+export function injectNextSequentialBatchItem(prompt, state) {
+    if (!state || state.cursor >= state.plan.length) return false;
+    injectSequentialBatchItem(
+        prompt?.output,
+        state.targetNodeIds,
+        state.plan[state.cursor],
+    );
+    state.cursor += 1;
+    return true;
 }

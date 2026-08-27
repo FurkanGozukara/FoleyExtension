@@ -5,7 +5,9 @@ import {
     buildSequentialBatchPlan,
     createBatchRunId,
     folderBatchTargets,
+    injectNextSequentialBatchItem,
     injectSequentialBatchItem,
+    promptChainTargets,
     supportsSequentialFolderQueue,
 } from "../web/js/secourses_folder_batch_queue.mjs";
 
@@ -32,6 +34,24 @@ test("finds active gallery folder paths", () => {
     assert.deepEqual(folderBatchTargets(output), [
         { nodeId: "10", batchFolder: "C:/batch" },
     ]);
+});
+
+test("finds inline prompt chains without changing the main prompt input", () => {
+    const output = {
+        10: {
+            class_type: "SECoursesReferenceGallery",
+            inputs: {
+                prompt: "first",
+                references: JSON.stringify({ prompts: ["second", "third"] }),
+            },
+        },
+        11: { class_type: "SECoursesReferenceGallery", inputs: { prompt: "single", references: "{}" } },
+    };
+
+    assert.deepEqual(promptChainTargets(output), [
+        { nodeId: "10", prompts: ["first", "second", "third"] },
+    ]);
+    assert.equal(output[10].inputs.prompt, "first");
 });
 
 test("builds separate ordered jobs for every prompt", () => {
@@ -64,6 +84,26 @@ test("injects only the current folder item into every gallery target", () => {
         assert.equal(node.inputs.batch_item_index, 1);
         assert.equal(node.inputs.batch_item_count, 4);
     }
+});
+
+test("consumes exactly one sequential item per submitted API prompt", () => {
+    const state = {
+        cursor: 0,
+        plan: [
+            { runId: "run_1", itemIndex: 0, itemCount: 2 },
+            { runId: "run_1", itemIndex: 1, itemCount: 2 },
+        ],
+        targetNodeIds: ["10"],
+    };
+    const first = { output: { 10: { inputs: {} } } };
+    const second = { output: { 10: { inputs: {} } } };
+
+    assert.equal(injectNextSequentialBatchItem(first, state), true);
+    assert.equal(injectNextSequentialBatchItem(second, state), true);
+    assert.equal(injectNextSequentialBatchItem({ output: {} }, state), false);
+    assert.equal(state.cursor, 2);
+    assert.equal(first.output[10].inputs.batch_item_index, 0);
+    assert.equal(second.output[10].inputs.batch_item_index, 1);
 });
 
 test("uses sequential queuing for combined outputs but not legacy merge graphs", () => {

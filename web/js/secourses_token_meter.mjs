@@ -59,9 +59,12 @@ function mediaInfo(file) {
 setMediaInfoProvider(mediaInfo);
 
 /** Estimates the token count of the generation this gallery node feeds. */
-export async function estimateForGallery(galleryNode) {
+export async function estimateForGallery(galleryNode, promptOverride = null) {
     const prompt = await app.graphToPrompt();
-    return estimateFromPrompt(prompt?.output || {}, galleryNode.id);
+    const output = prompt?.output || {};
+    const gallery = output[String(galleryNode.id)] ?? output[galleryNode.id];
+    if (gallery?.inputs && promptOverride !== null) gallery.inputs.prompt = promptOverride;
+    return estimateFromPrompt(output, galleryNode.id);
 }
 
 // ==================== Meter UI ====================
@@ -112,13 +115,14 @@ export class TokenMeter {
 
 /** Debounced graph-driven estimator bound to one gallery node. */
 export class GalleryTokenEstimator {
-    constructor(node, meter) {
+    constructor(node, meter, promptProvider = null) {
         this.node = node;
         this.meter = meter;
         this.timer = null;
         this.running = false;
         this.pending = false;
         this.disposed = false;
+        this.promptProvider = promptProvider;
         this.onGraphChanged = () => this.schedule();
         api.addEventListener("graphChanged", this.onGraphChanged);
         this.schedule(50);
@@ -150,7 +154,7 @@ export class GalleryTokenEstimator {
             if (!this.node.graph) {
                 return; // removed from the graph
             }
-            const result = await estimateForGallery(this.node);
+            const result = await estimateForGallery(this.node, this.promptProvider?.() ?? null);
             if (this.disposed) return;
             if (result.estimate) {
                 this.meter.setEstimate(result.estimate, result.label);

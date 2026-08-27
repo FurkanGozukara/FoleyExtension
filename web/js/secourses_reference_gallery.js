@@ -22,7 +22,8 @@ import {
     buildSequentialBatchPlan,
     createBatchRunId,
     folderBatchTargets,
-    injectSequentialBatchItem,
+    injectNextSequentialBatchItem,
+    promptChainTargets,
     supportsSequentialFolderQueue,
 } from "./secourses_folder_batch_queue.mjs";
 import { reconcilePortableComboPaths } from "./secourses_portable_combo_paths.mjs";
@@ -35,6 +36,7 @@ const VIDEO_RESULT_CLASS = "SECoursesBatchVideoSaveMerge";
 const QUEUE_ONLY_INPUTS = ["batch_run_id", "batch_item_index", "batch_item_count"];
 const UPLOAD_SUBFOLDER = "reference_gallery";
 const REORDER_MIME = "application/x-secourses-reference";
+const PROMPT_CHAIN_MAX = 1000;
 
 let sequentialQueueState = null;
 let sequentialQueueInstalled = false;
@@ -154,19 +156,14 @@ function installSequentialFolderQueue() {
 
     const originalGraphToPrompt = app.graphToPrompt.bind(app);
     const originalQueuePrompt = app.queuePrompt.bind(app);
+    const originalApiQueuePrompt = api.queuePrompt.bind(api);
 
-    app.graphToPrompt = async function () {
-        const prompt = await originalGraphToPrompt(...arguments);
-        const state = sequentialQueueState;
-        if (state && state.cursor < state.plan.length) {
-            injectSequentialBatchItem(
-                prompt.output,
-                state.targetNodeIds,
-                state.plan[state.cursor],
-            );
-            state.cursor += 1;
-        }
-        return prompt;
+    // Inject at the final API boundary, which is called exactly once per queued
+    // job. Graph serialization is also used by token meters and previews, so
+    // consuming the plan there can skip items while a batch is being queued.
+    api.queuePrompt = async function (number, prompt, options) {
+        injectNextSequentialBatchItem(prompt, sequentialQueueState);
+        return originalApiQueuePrompt(number, prompt, options);
     };
 
     app.queuePrompt = async function (number, batchCount = 1, queueNodeIds) {
@@ -175,38 +172,62 @@ function installSequentialFolderQueue() {
         }
 
         const snapshot = await originalGraphToPrompt();
-        const targets = folderBatchTargets(snapshot.output);
-        if (!targets.length || !supportsSequentialFolderQueue(snapshot.output)) {
+        const folderTargets = folderBatchTargets(snapshot.output);
+        const chainTargets = promptChainTargets(snapshot.output);
+        if ((!folderTargets.length && !chainTargets.length) || !supportsSequentialFolderQueue(snapshot.output)) {
             return originalQueuePrompt(number, batchCount, queueNodeIds);
         }
 
-        const folders = [...new Set(targets.map((target) => target.batchFolder))];
-        if (folders.length !== 1) {
+        if (folderTargets.length && chainTargets.length) {
             notify(
                 "error",
-                "Folder batch queue stopped",
-                "A workflow can sequentially process only one folder path at a time.",
+                "Prompt queue stopped",
+                "Use either Folder batch or added prompt boxes, not both at once.",
             );
             return false;
         }
 
         try {
-            const inspection = await inspectFolderBatch(folders[0]);
+            let promptCount;
+            let targetNodeIds;
+            if (folderTargets.length) {
+                const folders = [...new Set(folderTargets.map((target) => target.batchFolder))];
+                if (folders.length !== 1) {
+                    throw new Error("A workflow can sequentially process only one folder path at a time.");
+                }
+                promptCount = (await inspectFolderBatch(folders[0])).count;
+                targetNodeIds = folderTargets.map((target) => target.nodeId);
+            } else {
+                const counts = [...new Set(chainTargets.map((target) => target.prompts.length))];
+                if (counts.length !== 1) {
+                    throw new Error("Every connected prompt chain must contain the same number of prompts.");
+                }
+                for (const target of chainTargets) {
+                    const emptyIndex = target.prompts.findIndex(
+                        (prompt) => typeof prompt !== "string" || !prompt.trim(),
+                    );
+                    if (emptyIndex !== -1) {
+                        throw new Error(`Prompt ${emptyIndex + 1} is empty. Fill it or remove it.`);
+                    }
+                }
+                promptCount = counts[0];
+                targetNodeIds = chainTargets.map((target) => target.nodeId);
+            }
             const plan = buildSequentialBatchPlan(
-                inspection.count,
+                promptCount,
                 Number(batchCount ?? 1),
                 createBatchRunId,
             );
             sequentialQueueState = {
                 cursor: 0,
                 plan,
-                targetNodeIds: targets.map((target) => target.nodeId),
+                targetNodeIds,
             };
             // A normal append queue gives every item a monotonically increasing
             // server priority. This guarantees item 1 saves before item 2 starts.
             return await originalQueuePrompt(0, plan.length, queueNodeIds);
         } catch (error) {
-            notify("error", "Folder batch queue stopped", String(error?.message || error));
+            notify("error", "Prompt queue stopped", String(error?.message || error));
             return false;
         } finally {
             sequentialQueueState = null;
@@ -261,11 +282,11 @@ class ReferenceGalleryUI {
         this.continueLastFrameWidget = node.widgets?.find((w) => w.name === "continue_batch_with_last_frame");
         this.contextFramesWidget = node.widgets?.find((w) => w.name === "continuation_context_frames");
         this.state = { images: [], videos: [], audios: [] };
-        this.suggestIndex = 0;
-        this.suggestMatches = null;
         this.hasHydratedPrompt = false;
         this.promptTouched = false;
         this.dragContext = null;
+        this.promptEditors = [];
+        this.activeEditor = null;
         this.buildDOM();
         hideWidget(this.promptWidget);
         hideWidget(this.manifestWidget);
@@ -289,7 +310,11 @@ class ReferenceGalleryUI {
         }
         this.refreshLayout();
         // Live "current / budget" token estimate of the generation this gallery feeds.
-        this.tokenEstimator = new GalleryTokenEstimator(node, this.tokenMeter);
+        this.tokenEstimator = new GalleryTokenEstimator(
+            node,
+            this.tokenMeter,
+            () => (this.activeEditor ?? this.promptEditors[0])?.textarea.value ?? "",
+        );
     }
 
     dispose() {
@@ -320,6 +345,11 @@ class ReferenceGalleryUI {
         this.trimToggle.className = "secourses-refgal-add secourses-refgal-trimtoggle";
         this.trimToggle.textContent = "✂ Load + trim";
         this.trimToggle.title = "Optional loader: preview a video or audio file, pick a start/end window, then add it to the references. Leave the full range selected to add it untrimmed.";
+        this.addPromptButton = document.createElement("button");
+        this.addPromptButton.type = "button";
+        this.addPromptButton.className = "secourses-refgal-add secourses-refgal-addprompt";
+        this.addPromptButton.textContent = "+ Prompt";
+        this.addPromptButton.title = "Add another prompt. Added prompts run in order and share these references and batch controls.";
         this.counter = document.createElement("span");
         this.counter.className = "secourses-refgal-counter";
         this.soundtrackHint = document.createElement("span");
@@ -330,7 +360,7 @@ class ReferenceGalleryUI {
         this.hint.className = "secourses-refgal-hint";
         this.hint.textContent = "Type @ in the prompt to reference";
         this.hint.title = "Type '@' in the prompt for reference autocomplete, eg '@image1'. Click any card to insert its token.";
-        this.toolbar.append(this.addButton, this.trimToggle, this.counter, this.soundtrackHint, this.hint);
+        this.toolbar.append(this.addButton, this.trimToggle, this.addPromptButton, this.counter, this.soundtrackHint, this.hint);
 
         this.cards = document.createElement("div");
         this.cards.className = "secourses-refgal-cards";
@@ -341,19 +371,9 @@ class ReferenceGalleryUI {
         this.cardsWrap.className = "secourses-refgal-cardswrap";
         this.cardsWrap.append(this.cards, this.empty);
 
-        this.promptWrap = document.createElement("div");
-        this.promptWrap.className = "secourses-refgal-promptwrap";
-        this.overlay = document.createElement("div");
-        this.overlay.className = "secourses-refgal-overlay";
-        this.overlay.setAttribute("aria-hidden", "true");
-        this.textarea = document.createElement("textarea");
-        this.textarea.className = "secourses-refgal-prompt";
-        this.textarea.placeholder = "Prompt — type @ to reference attachments, eg @image1 …";
-        this.textarea.spellcheck = false;
-        this.suggest = document.createElement("div");
-        this.suggest.className = "secourses-refgal-suggest";
-        this.suggest.hidden = true;
-        this.promptWrap.append(this.overlay, this.textarea, this.suggest);
+        this.promptList = document.createElement("div");
+        this.promptList.className = "secourses-refgal-promptlist";
+        this.createPromptEditor("");
 
         this.batchRow = document.createElement("div");
         this.batchRow.className = "secourses-refgal-batchrow";
@@ -429,13 +449,196 @@ class ReferenceGalleryUI {
             this.toolbar,
             this.cardsWrap,
             this.loader,
-            this.promptWrap,
+            this.promptList,
             this.batchRow,
             this.continuationRow,
             this.fileInput,
             this.loaderFileInput,
         );
         this.bindEvents();
+    }
+
+    createPromptEditor(value) {
+        const row = document.createElement("div");
+        row.className = "secourses-refgal-promptrow";
+        const header = document.createElement("div");
+        header.className = "secourses-refgal-promptheader";
+        const label = document.createElement("span");
+        label.className = "secourses-refgal-promptlabel";
+        const controls = document.createElement("span");
+        controls.className = "secourses-refgal-promptcontrols";
+        const moveUp = document.createElement("button");
+        moveUp.type = "button";
+        moveUp.textContent = "↑";
+        moveUp.title = "Move this prompt earlier";
+        moveUp.setAttribute("aria-label", moveUp.title);
+        const moveDown = document.createElement("button");
+        moveDown.type = "button";
+        moveDown.textContent = "↓";
+        moveDown.title = "Move this prompt later";
+        moveDown.setAttribute("aria-label", moveDown.title);
+        const remove = document.createElement("button");
+        remove.type = "button";
+        remove.textContent = "×";
+        remove.title = "Remove this prompt";
+        remove.setAttribute("aria-label", remove.title);
+        controls.append(moveUp, moveDown, remove);
+        header.append(label, controls);
+
+        const wrap = document.createElement("div");
+        wrap.className = "secourses-refgal-promptwrap";
+        const overlay = document.createElement("div");
+        overlay.className = "secourses-refgal-overlay";
+        overlay.setAttribute("aria-hidden", "true");
+        const textarea = document.createElement("textarea");
+        textarea.className = "secourses-refgal-prompt";
+        textarea.placeholder = "Prompt — type @ to reference attachments, eg @image1 …";
+        textarea.spellcheck = false;
+        textarea.value = value;
+        const suggest = document.createElement("div");
+        suggest.className = "secourses-refgal-suggest";
+        suggest.hidden = true;
+        wrap.append(overlay, textarea, suggest);
+        row.append(header, wrap);
+
+        const editor = {
+            row, header, label, controls, moveUp, moveDown, remove,
+            wrap, overlay, textarea, suggest,
+            suggestIndex: 0,
+            suggestMatches: null,
+            suggestContext: null,
+        };
+        this.promptEditors.push(editor);
+        this.promptList.appendChild(row);
+        this.setPrimaryEditorAliases();
+
+        moveUp.addEventListener("click", () => this.movePromptEditor(editor, -1));
+        moveDown.addEventListener("click", () => this.movePromptEditor(editor, 1));
+        remove.addEventListener("click", () => this.removePromptEditor(editor));
+        textarea.addEventListener("focus", () => {
+            this.activeEditor = editor;
+            this.updatePromptEditorLabels();
+            this.scheduleTokenEstimate();
+        });
+        textarea.addEventListener("paste", async (event) => {
+            const files = [...(event.clipboardData?.items || [])]
+                .filter((item) => item.kind === "file")
+                .map((item) => item.getAsFile())
+                .filter((file) => file && mediaKind(file));
+            if (!files.length) return;
+            event.preventDefault();
+            event.stopPropagation();
+            await this.addFiles(files);
+        });
+        textarea.addEventListener("input", () => this.onPromptInput(editor));
+        textarea.addEventListener("scroll", () => this.syncOverlayScroll(editor));
+        textarea.addEventListener("click", () => this.updateSuggestions(editor));
+        textarea.addEventListener("blur", () => window.setTimeout(() => this.closeSuggestions(editor), 150));
+        textarea.addEventListener("keydown", (event) => this.onPromptKeydown(event, editor));
+        suggest.addEventListener("mousedown", (event) => event.preventDefault());
+        this.updatePromptEditorLabels();
+        return editor;
+    }
+
+    setPrimaryEditorAliases() {
+        const primary = this.promptEditors[0];
+        this.promptWrap = primary?.wrap;
+        this.overlay = primary?.overlay;
+        this.textarea = primary?.textarea;
+        this.suggest = primary?.suggest;
+        if (!this.activeEditor || !this.promptEditors.includes(this.activeEditor)) {
+            this.activeEditor = primary;
+        }
+    }
+
+    updatePromptEditorLabels() {
+        const chained = this.promptEditors.length > 1;
+        this.promptEditors.forEach((editor, index) => {
+            editor.header.hidden = !chained;
+            editor.label.textContent = `Prompt ${index + 1}`;
+            editor.moveUp.disabled = index === 0;
+            editor.moveDown.disabled = index === this.promptEditors.length - 1;
+            editor.remove.disabled = !chained;
+            editor.row.classList.toggle("secourses-refgal-promptrow-active", editor === this.activeEditor);
+        });
+        this.updateBatchModeAvailability();
+    }
+
+    addPromptEditor() {
+        if (this.promptEditors.length >= PROMPT_CHAIN_MAX || this.batchFolderInput?.value.trim()) return;
+        const editor = this.createPromptEditor("");
+        this.activeEditor = editor;
+        this.savePromptState({ forceManifest: true });
+        this.updatePromptEditorLabels();
+        this.refreshLayout();
+        editor.textarea.focus();
+    }
+
+    removePromptEditor(editor) {
+        if (this.promptEditors.length <= 1) return;
+        const index = this.promptEditors.indexOf(editor);
+        if (index === -1) return;
+        this.promptEditors.splice(index, 1);
+        editor.row.remove();
+        if (this.activeEditor === editor) {
+            this.activeEditor = this.promptEditors[Math.min(index, this.promptEditors.length - 1)];
+        }
+        this.setPrimaryEditorAliases();
+        this.savePromptState({ forceManifest: true });
+        this.updatePromptEditorLabels();
+        this.renderAllOverlays();
+        this.refreshLayout();
+    }
+
+    movePromptEditor(editor, offset) {
+        const index = this.promptEditors.indexOf(editor);
+        const target = index + offset;
+        if (index < 0 || target < 0 || target >= this.promptEditors.length) return;
+        this.promptEditors.splice(index, 1);
+        this.promptEditors.splice(target, 0, editor);
+        for (const item of this.promptEditors) this.promptList.appendChild(item.row);
+        this.setPrimaryEditorAliases();
+        this.savePromptState({ forceManifest: true });
+        this.updatePromptEditorLabels();
+    }
+
+    setAdditionalPrompts(prompts) {
+        for (const editor of this.promptEditors.slice(1)) editor.row.remove();
+        this.promptEditors.splice(1);
+        for (const prompt of prompts) this.createPromptEditor(prompt);
+        this.setPrimaryEditorAliases();
+        this.updatePromptEditorLabels();
+    }
+
+    savePromptState({ forceManifest = false } = {}) {
+        this.promptTouched = true;
+        this.syncPromptToWidget();
+        if (forceManifest || this.promptEditors.length > 1) this.saveManifest();
+        this.node.setDirtyCanvas(true, true);
+        this.scheduleTokenEstimate();
+    }
+
+    onPromptInput(editor) {
+        this.activeEditor = editor;
+        this.savePromptState();
+        this.renderOverlay(null, editor);
+        this.updateSuggestions(editor);
+        this.updatePromptEditorLabels();
+    }
+
+    updateBatchModeAvailability() {
+        if (!this.addPromptButton || !this.batchFolderInput) return;
+        const chained = this.promptEditors.length > 1;
+        const folder = Boolean(this.batchFolderInput.value.trim());
+        this.addPromptButton.disabled = folder || this.promptEditors.length >= PROMPT_CHAIN_MAX;
+        this.addPromptButton.title = folder
+            ? "Clear Folder batch before adding prompt boxes."
+            : "Add another prompt. Added prompts run in order and share these references and batch controls.";
+        this.batchFolderInput.disabled = chained;
+        this.batchFolderInput.title = chained
+            ? "Remove the added prompt boxes before using Folder batch."
+            : "Local folder containing UTF-8 .txt prompts. Subfolders are scanned recursively.";
+        if (this.mergeLabel) this.updateMergeAvailability();
     }
 
     /** The optional "Load + trim" panel: preview one video/audio file and pick a start/end window. */
@@ -608,11 +811,13 @@ class ReferenceGalleryUI {
     bindEvents() {
         this.addButton.addEventListener("click", () => this.fileInput.click());
         this.trimToggle.addEventListener("click", () => this.toggleTrimLoader());
+        this.addPromptButton.addEventListener("click", () => this.addPromptEditor());
         this.batchFolderInput.addEventListener("input", () => {
             if (this.batchFolderWidget) {
                 this.batchFolderWidget.value = this.batchFolderInput.value;
                 this.batchFolderWidget.callback?.(this.batchFolderWidget.value);
             }
+            this.updateBatchModeAvailability();
             this.node.setDirtyCanvas(true, true);
             this.scheduleTokenEstimate();
         });
@@ -704,29 +909,6 @@ class ReferenceGalleryUI {
             this.clearDropMarkers();
         });
 
-        this.textarea.addEventListener("paste", async (event) => {
-            const files = [...(event.clipboardData?.items || [])]
-                .filter((item) => item.kind === "file")
-                .map((item) => item.getAsFile())
-                .filter((file) => file && mediaKind(file));
-            if (!files.length) return;
-            event.preventDefault();
-            event.stopPropagation();
-            await this.addFiles(files);
-        });
-
-        this.textarea.addEventListener("input", () => {
-            this.promptTouched = true;
-            this.syncPromptToWidget();
-            this.renderOverlay();
-            this.updateSuggestions();
-            this.scheduleTokenEstimate();
-        });
-        this.textarea.addEventListener("scroll", () => this.syncOverlayScroll());
-        this.textarea.addEventListener("click", () => this.updateSuggestions());
-        this.textarea.addEventListener("blur", () => window.setTimeout(() => this.closeSuggestions(), 150));
-        this.textarea.addEventListener("keydown", (event) => this.onPromptKeydown(event));
-        this.suggest.addEventListener("mousedown", (event) => event.preventDefault());
     }
 
     // ==================== State & widgets sync ====================
@@ -742,7 +924,9 @@ class ReferenceGalleryUI {
             images: Array.isArray(parsed.images) ? parsed.images.filter((e) => e && e.file) : [],
             videos: Array.isArray(parsed.videos) ? parsed.videos.filter((e) => e && e.file) : [],
             audios: Array.isArray(parsed.audios) ? parsed.audios.filter((e) => e && e.file) : [],
+            prompts: Array.isArray(parsed.prompts) ? parsed.prompts.filter((prompt) => typeof prompt === "string") : [],
         };
+        this.setAdditionalPrompts(this.state.prompts);
         this.batchFolderInput.value = String(this.batchFolderWidget?.value ?? "");
         const mergeValue = this.mergeBatchWidget?.value;
         this.mergeCheckbox.checked = mergeValue === true || mergeValue === "true" || mergeValue === 1;
@@ -750,6 +934,7 @@ class ReferenceGalleryUI {
         this.lastFrameCheckbox.checked = continuationValue === true || continuationValue === "true" || continuationValue === 1;
         const contextValue = String(this.contextFramesWidget?.value ?? "1");
         this.contextFramesSelect.value = ["1", "5", "22", "39", "56"].includes(contextValue) ? contextValue : "1";
+        this.updateBatchModeAvailability();
         this.updateMergeAvailability();
         this.updateContinuationAvailability();
         if (hydratePrompt) {
@@ -773,18 +958,25 @@ class ReferenceGalleryUI {
         const hasVideo = targetTypes.some((type) =>
             type === "SECoursesBatchVideoMerge" || type === VIDEO_RESULT_CLASS
         );
+        const chained = this.promptEditors.length > 1;
         if (hasAudio && !hasVideo) {
-            this.mergeLabel.textContent = "Merge audio";
+            this.mergeLabel.textContent = chained ? "Merge chain audio" : "Merge audio";
             this.mergeCheckbox.setAttribute("aria-label", "Merge audio");
-            this.mergeToggle.title = "Save each prompt's FLAC before the next queued prompt starts, then create one lossless merged FLAC per prompt directory after the final job. The complete last merge is returned.";
+            this.mergeToggle.title = chained
+                ? "Save each prompt's FLAC, then create one lossless merged FLAC after the final prompt."
+                : "Save each prompt's FLAC before the next queued prompt starts, then create one lossless merged FLAC per prompt directory after the final job. The complete last merge is returned.";
         } else if (hasAudio && hasVideo) {
-            this.mergeLabel.textContent = "Merge outputs";
+            this.mergeLabel.textContent = chained ? "Merge chain outputs" : "Merge outputs";
             this.mergeCheckbox.setAttribute("aria-label", "Merge outputs");
-            this.mergeToggle.title = "Save each prompt's outputs before the next queued prompt starts, then merge each prompt directory after the final job.";
+            this.mergeToggle.title = chained
+                ? "Save each prompt's outputs, then merge them in prompt order after the final job."
+                : "Save each prompt's outputs before the next queued prompt starts, then merge each prompt directory after the final job.";
         } else {
-            this.mergeLabel.textContent = "Merge videos";
+            this.mergeLabel.textContent = chained ? "Merge chain videos" : "Merge videos";
             this.mergeCheckbox.setAttribute("aria-label", "Merge videos");
-            this.mergeToggle.title = "With an init video, append the generated segment to it. With Folder batch, save each prompt's MP4 and merge each prompt directory after the final job.";
+            this.mergeToggle.title = chained
+                ? "Save each prompt's MP4, then merge them in prompt order after the final job."
+                : "With an init video, append the generated segment to it. With Folder batch, save each prompt's MP4 and merge each prompt directory after the final job.";
         }
         this.mergeToggle.hidden = !available;
         this.mergeCheckbox.disabled = !available;
@@ -814,13 +1006,16 @@ class ReferenceGalleryUI {
             this.syncPromptToWidget();
         }
         this.hasHydratedPrompt = true;
-        this.renderOverlay();
+        this.renderAllOverlays();
         this.scheduleTokenEstimate();
     }
 
     saveManifest() {
         if (this.manifestWidget) {
-            this.manifestWidget.value = JSON.stringify(this.state);
+            this.state.prompts = this.promptEditors.slice(1).map((editor) => editor.textarea.value);
+            const serialized = { ...this.state };
+            if (!serialized.prompts.length) delete serialized.prompts;
+            this.manifestWidget.value = JSON.stringify(serialized);
             this.manifestWidget.callback?.(this.manifestWidget.value);
         }
         this.node.setDirtyCanvas(true, true);
@@ -1182,7 +1377,7 @@ class ReferenceGalleryUI {
             `${c.image}/${REFERENCE_TYPES.image.max} images | ${c.video}/${REFERENCE_TYPES.video.max} videos | ${c.audio}/${REFERENCE_TYPES.audio.max} audio`;
         this.hint.style.display = total ? "" : "none";
         this.empty.style.display = total ? "none" : "";
-        this.renderOverlay();
+        this.renderAllOverlays();
         this.refreshLayout();
         this.scheduleTokenEstimate();
     }
@@ -1288,7 +1483,8 @@ class ReferenceGalleryUI {
         const rows = total ? Math.ceil(total / perRow) : 0;
         const cardsH = total ? Math.min(rows, 2) * 124 : 30;
         const continuationH = 40;
-        return 34 + cardsH + this.trimLoaderHeight() + 116 + 66 + continuationH + 14;
+        const promptH = Math.min(360, 116 + Math.max(0, this.promptEditors.length - 1) * 132);
+        return 34 + cardsH + this.trimLoaderHeight() + promptH + 66 + continuationH + 14;
     }
 
     computeHeight(width) {
@@ -1308,7 +1504,8 @@ class ReferenceGalleryUI {
     // ==================== Token insertion ====================
 
     insertToken(type, n) {
-        const box = this.textarea;
+        const editor = this.activeEditor ?? this.promptEditors[0];
+        const box = editor.textarea;
         const token = tokenFor(type, n);
         const start = box.selectionStart ?? box.value.length;
         const end = box.selectionEnd ?? box.value.length;
@@ -1325,20 +1522,22 @@ class ReferenceGalleryUI {
         const position = before.length + insert.length;
         box.focus();
         box.setSelectionRange(position, position);
-        this.promptTouched = true;
-        this.syncPromptToWidget();
-        this.renderOverlay();
+        this.onPromptInput(editor);
     }
 
     // ==================== Colored pill overlay ====================
 
-    syncOverlayScroll() {
-        this.overlay.scrollTop = this.textarea.scrollTop;
-        this.overlay.scrollLeft = this.textarea.scrollLeft;
+    syncOverlayScroll(editor = this.promptEditors[0]) {
+        editor.overlay.scrollTop = editor.textarea.scrollTop;
+        editor.overlay.scrollLeft = editor.textarea.scrollLeft;
     }
 
-    renderOverlay(caretIndex = null) {
-        const text = this.textarea.value;
+    renderAllOverlays() {
+        for (const editor of this.promptEditors) this.renderOverlay(null, editor);
+    }
+
+    renderOverlay(caretIndex = null, editor = this.promptEditors[0]) {
+        const text = editor.textarea.value;
         const counts = this.counts();
         const tokenRegex = /(?<![\w@])@(image|img|picture|pic|video|vid|audio|aud|sound)#?(\d{1,2})(?![0-9a-zA-Z])|<(Picture|Video|Audio)[ ]?(\d{1,2})>/gi;
         let html = "";
@@ -1390,15 +1589,15 @@ class ReferenceGalleryUI {
             html += `<span class="${cls}"${style}>${escapeHtml(match[0])}</span>`;
         }
         emitPlain(text.length);
-        this.overlay.innerHTML = html + "​";
-        this.syncOverlayScroll();
+        editor.overlay.innerHTML = html + "​";
+        this.syncOverlayScroll(editor);
     }
 
     // ==================== '@' autocomplete ====================
 
     /** Returns {start, end, partial} when the text before the caret ends in a partial '@' reference. */
-    getSuggestContext() {
-        const box = this.textarea;
+    getSuggestContext(editor = this.activeEditor ?? this.promptEditors[0]) {
+        const box = editor.textarea;
         const start = box.selectionStart;
         if (start == null || box.selectionEnd !== start) return null;
         const before = box.value.substring(0, start);
@@ -1407,39 +1606,39 @@ class ReferenceGalleryUI {
         return { start: start - match[0].length, end: start, partial: match[1] };
     }
 
-    updateSuggestions() {
-        const context = this.getSuggestContext();
+    updateSuggestions(editor = this.activeEditor ?? this.promptEditors[0]) {
+        const context = this.getSuggestContext(editor);
         if (!context) {
-            this.closeSuggestions();
+            this.closeSuggestions(editor);
             return;
         }
         const entries = this.referenceEntries();
         if (!entries.length) {
-            this.closeSuggestions();
+            this.closeSuggestions(editor);
             return;
         }
         const partial = context.partial.toLowerCase().replace("#", "");
         const matches = partial === "" ? entries
             : entries.filter((entry) => entry.keys.some((key) => key.startsWith(partial)));
         if (!matches.length) {
-            this.closeSuggestions();
+            this.closeSuggestions(editor);
             return;
         }
-        this.suggestContext = context;
-        this.suggestMatches = matches;
-        this.suggestIndex = Math.min(this.suggestIndex, matches.length - 1);
-        this.renderSuggestions();
+        editor.suggestContext = context;
+        editor.suggestMatches = matches;
+        editor.suggestIndex = Math.min(editor.suggestIndex, matches.length - 1);
+        this.renderSuggestions(editor);
     }
 
-    renderSuggestions() {
-        this.suggest.textContent = "";
+    renderSuggestions(editor = this.activeEditor ?? this.promptEditors[0]) {
+        editor.suggest.textContent = "";
         const header = document.createElement("div");
         header.className = "secourses-refgal-suggest-header";
         header.textContent = "REFERENCES";
-        this.suggest.appendChild(header);
-        this.suggestMatches.forEach((entry, index) => {
+        editor.suggest.appendChild(header);
+        editor.suggestMatches.forEach((entry, index) => {
             const row = document.createElement("div");
-            row.className = "secourses-refgal-suggest-item" + (index === this.suggestIndex ? " selected" : "");
+            row.className = "secourses-refgal-suggest-item" + (index === editor.suggestIndex ? " selected" : "");
             let thumb;
             if (entry.thumbSrc) {
                 thumb = document.createElement("img");
@@ -1461,43 +1660,43 @@ class ReferenceGalleryUI {
             name.textContent = entry.filename;
             row.append(thumb, token, name);
             row.addEventListener("mouseenter", () => {
-                this.suggestIndex = index;
-                this.renderSuggestions();
+                editor.suggestIndex = index;
+                this.renderSuggestions(editor);
             });
-            row.addEventListener("click", () => this.applyCompletion(entry));
-            this.suggest.appendChild(row);
+            row.addEventListener("click", () => this.applyCompletion(entry, editor));
+            editor.suggest.appendChild(row);
         });
-        this.suggest.hidden = false;
-        this.positionSuggestions();
+        editor.suggest.hidden = false;
+        this.positionSuggestions(editor);
     }
 
-    positionSuggestions() {
+    positionSuggestions(editor = this.activeEditor ?? this.promptEditors[0]) {
         // The overlay mirrors the textarea exactly, so a marker span at the caret
         // index gives the caret's pixel position for popover anchoring.
-        this.renderOverlay(this.suggestContext?.end ?? null);
-        const marker = this.overlay.querySelector(".secourses-refgal-caret-marker");
+        this.renderOverlay(editor.suggestContext?.end ?? null, editor);
+        const marker = editor.overlay.querySelector(".secourses-refgal-caret-marker");
         if (!marker) return;
-        const lineHeight = parseFloat(getComputedStyle(this.textarea).lineHeight) || 16;
-        let top = marker.offsetTop - this.textarea.scrollTop + lineHeight + 2;
-        let left = marker.offsetLeft - this.textarea.scrollLeft;
-        const maxLeft = Math.max(0, this.promptWrap.clientWidth - 240);
+        const lineHeight = parseFloat(getComputedStyle(editor.textarea).lineHeight) || 16;
+        let top = marker.offsetTop - editor.textarea.scrollTop + lineHeight + 2;
+        let left = marker.offsetLeft - editor.textarea.scrollLeft;
+        const maxLeft = Math.max(0, editor.wrap.clientWidth - 240);
         left = Math.min(Math.max(0, left), maxLeft);
-        top = Math.min(Math.max(0, top), this.promptWrap.clientHeight - 8);
-        this.suggest.style.left = `${left}px`;
-        this.suggest.style.top = `${top}px`;
-        this.renderOverlay();
+        top = Math.min(Math.max(0, top), editor.wrap.clientHeight - 8);
+        editor.suggest.style.left = `${left}px`;
+        editor.suggest.style.top = `${top}px`;
+        this.renderOverlay(null, editor);
     }
 
-    closeSuggestions() {
-        this.suggest.hidden = true;
-        this.suggestMatches = null;
-        this.suggestIndex = 0;
+    closeSuggestions(editor = this.activeEditor ?? this.promptEditors[0]) {
+        editor.suggest.hidden = true;
+        editor.suggestMatches = null;
+        editor.suggestIndex = 0;
     }
 
-    applyCompletion(entry) {
-        const context = this.suggestContext ?? this.getSuggestContext();
+    applyCompletion(entry, editor = this.activeEditor ?? this.promptEditors[0]) {
+        const context = editor.suggestContext ?? this.getSuggestContext(editor);
         if (!context) return;
-        const box = this.textarea;
+        const box = editor.textarea;
         const before = box.value.substring(0, context.start);
         const after = box.value.substring(context.end);
         const insert = entry.token + (/^[\s,.)\]}!?;:]/.test(after) ? "" : " ");
@@ -1505,33 +1704,31 @@ class ReferenceGalleryUI {
         const position = before.length + insert.length;
         box.focus();
         box.setSelectionRange(position, position);
-        this.promptTouched = true;
-        this.syncPromptToWidget();
-        this.renderOverlay();
-        this.closeSuggestions();
+        this.onPromptInput(editor);
+        this.closeSuggestions(editor);
     }
 
-    onPromptKeydown(event) {
-        const open = this.suggestMatches && !this.suggest.hidden;
+    onPromptKeydown(event, editor = this.activeEditor ?? this.promptEditors[0]) {
+        const open = editor.suggestMatches && !editor.suggest.hidden;
         if (open) {
             if (event.key === "ArrowDown" || event.key === "ArrowUp") {
                 event.preventDefault();
                 event.stopPropagation();
                 const delta = event.key === "ArrowDown" ? 1 : -1;
-                this.suggestIndex = (this.suggestIndex + delta + this.suggestMatches.length) % this.suggestMatches.length;
-                this.renderSuggestions();
+                editor.suggestIndex = (editor.suggestIndex + delta + editor.suggestMatches.length) % editor.suggestMatches.length;
+                this.renderSuggestions(editor);
                 return;
             }
             if (event.key === "Enter" || event.key === "Tab") {
                 event.preventDefault();
                 event.stopPropagation();
-                this.applyCompletion(this.suggestMatches[this.suggestIndex]);
+                this.applyCompletion(editor.suggestMatches[editor.suggestIndex], editor);
                 return;
             }
             if (event.key === "Escape") {
                 event.preventDefault();
                 event.stopPropagation();
-                this.closeSuggestions();
+                this.closeSuggestions(editor);
                 return;
             }
         }

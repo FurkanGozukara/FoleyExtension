@@ -40,6 +40,14 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     validation error instead of attempting an unsafe allocation.
   - Token aliases: `@img1`, `@pic1`, `@picture1`, `@vid1`, `@aud1`, `@sound1`,
     and `@image#1` all work.
+  - **Inline prompt chain** uses the compact *+ Prompt* button to add prompt
+    boxes only when they are needed. The boxes run from top to bottom as
+    separate queued jobs, share the gallery references and normal duration,
+    and use the same optional output merge and previous-video continuation as
+    Folder batch. Every box retains colored reference tokens, `@` autocomplete,
+    card-click token insertion, reordering, and removal. The active box drives
+    the live token meter. Folder batch and inline prompts are mutually exclusive
+    in the UI, so existing single-prompt presets remain unchanged and uncluttered.
   - **Optional folder batch** uses a two-line, wrapping local-path field. The
     frontend queues each prompt as a separate job in natural order. Each job is
     fully generated, decoded, and saved before the next job starts. The adjacent

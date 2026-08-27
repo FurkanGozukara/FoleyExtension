@@ -7,7 +7,8 @@ Two nodes cooperate to replace banks of LoadImage / LoadVideo / LoadAudio nodes:
   through ComfyUI's native ``/upload/image`` endpoint and stores an ordered
   JSON manifest in the hidden ``references`` widget. The Python side emits a
   lightweight reference pack; model adapters inspect and decode the files only
-  when their target canvas and duration are known.
+  when their target canvas and duration are known. Its compact ``+ Prompt``
+  control adds an inline sequential prompt chain without changing the node API.
 - ``SECoursesMiniMaxH3References`` adapts a reference pack to MiniMax H3: it
   rewrites ``@image1`` / ``@video1`` / ``@audio1`` prompt tokens into the
   ``<Picture i>`` / ``<Video k>`` / ``<Audio j>`` labels the model expects and
@@ -257,9 +258,9 @@ def select_prompt_audio_references(prompt, audios, max_audios):
 
 
 def _parse_manifest(references):
-    """Parses the gallery JSON manifest into {'images': [...], 'videos': [...], 'audios': [...]}."""
+    """Parse the gallery media plus its optional inline prompt chain."""
     if not references or not str(references).strip():
-        return {"images": [], "videos": [], "audios": []}
+        return {"images": [], "videos": [], "audios": [], "prompts": []}
     try:
         data = json.loads(references)
     except (TypeError, ValueError) as error:
@@ -289,6 +290,19 @@ def _parse_manifest(references):
                     cleaned_entry["trim_end"] = trim[1]
             cleaned.append(cleaned_entry)
         manifest[key] = cleaned
+    prompts = data.get("prompts") or []
+    if not isinstance(prompts, list):
+        raise ValueError("Reference gallery manifest field 'prompts' must be a list.")
+    if len(prompts) >= BATCH_MAX_PROMPTS:
+        raise ValueError(
+            f"A prompt chain can contain at most {BATCH_MAX_PROMPTS} prompts including the main prompt."
+        )
+    for index, prompt in enumerate(prompts, start=2):
+        if not isinstance(prompt, str):
+            raise ValueError(f"Prompt {index} in the prompt chain must be text.")
+        if not prompt.strip():
+            raise ValueError(f"Prompt {index} in the prompt chain is empty. Fill it or remove it.")
+    manifest["prompts"] = prompts
     return manifest
 
 
@@ -666,6 +680,7 @@ def _collect_folder_batch(batch_folder, fallback_manifest, video_fps, max_second
             "init_image": dict(init_image) if init_image else None,
             "init_audio": dict(init_audio) if init_audio else None,
             "batch": {
+                "source": "folder",
                 "root": str(root),
                 "folder": relative_folder,
                 "prompt_file": prompt_path.name,
@@ -2027,7 +2042,7 @@ class SECoursesReferenceGallery:
                     "multiline": True,
                     "default": "",
                     "dynamicPrompts": True,
-                    "tooltip": "Prompt for the generation. Type '@' to reference gallery attachments, eg '@image1', '@video1', '@audio1' (aliases like '@img1', '@pic1', '@vid1', '@sound1' also work).",
+                    "tooltip": "Prompt for the generation. Use the gallery's + Prompt control to add sequential prompts. Type '@' to reference gallery attachments, eg '@image1', '@video1', '@audio1' (aliases like '@img1', '@pic1', '@vid1', '@sound1' also work).",
                 }),
                 "references": ("STRING", {
                     "multiline": False,
@@ -2082,7 +2097,7 @@ class SECoursesReferenceGallery:
     OUTPUT_TOOLTIPS = (
         "Every gallery reference bundled in upload order, ready for a model adapter node such as 'MiniMax H3 References (Gallery)'.",
         "The prompt exactly as typed, or one output per naturally ordered .txt file when Folder batch is active.",
-        "True for folder-batch items and false for the normal single prompt.",
+        "True for folder-batch and inline prompt-chain items; false for a normal single prompt.",
         "True when init-video or folder-batch merging is enabled.",
         "True when init-video or folder-batch video-frame continuation is enabled.",
         "Selected continuation context length: 1, 5, 22, 39, or 56 video frames.",
@@ -2094,8 +2109,9 @@ class SECoursesReferenceGallery:
         "'Load + trim' loader previews a video or audio file and selects a start/end window before adding it; "
         "only that window is decoded at generation time. Feed the references output into a model adapter node "
         "(eg 'MiniMax H3 References (Gallery)'). Media stays lazy until the adapter can apply its canvas, "
-        "duration, and memory limits. An optional folder path queues one complete job per recursively discovered "
-        ".txt prompt, saving each output before the next job starts. Compatible video presets can match a prompt's "
+        "duration, and memory limits. The compact + Prompt control queues inline prompts in order with the same "
+        "references, merge, and continuation behavior. Alternatively, an optional folder path queues one complete "
+        "job per recursively discovered .txt prompt, saving each output before the next job starts. Compatible video presets can match a prompt's "
         "basename to an init image, init audio, or both; other media remains reference material. Media comes only "
         "from the prompt's own directory, with gallery attachments as fallback. Optional toggles merge after the final "
         "job or feed 1, 5, 22, 39, or 56 of each completed video's final frames into the next prompt. A prompt filename ending in "
@@ -2123,17 +2139,55 @@ class SECoursesReferenceGallery:
         folder_batch = _collect_folder_batch(
             batch_folder, manifest, video_fps, max_seconds, bool(match_batch_init_media)
         )
+        chained_prompts = manifest["prompts"]
+        if folder_batch is not None and chained_prompts:
+            raise ValueError("Use either Folder batch or the inline prompt chain, not both at once.")
+
+        batch_source = None
         if folder_batch is not None:
             packs, prompts = folder_batch
+            batch_source = "folder"
+        elif chained_prompts:
+            prompts = [prompt, *chained_prompts]
+            if not str(prompt).strip():
+                raise ValueError("Prompt 1 in the prompt chain is empty. Fill it or remove the added prompts.")
+            packs = []
+            for index, chained_prompt in enumerate(prompts, start=1):
+                packs.append({
+                    "version": 4,
+                    "prompt": chained_prompt,
+                    "video_fps": float(video_fps),
+                    "max_seconds": max_seconds,
+                    "images": [dict(entry) for entry in manifest["images"]],
+                    "videos": [dict(entry) for entry in manifest["videos"]],
+                    "audios": [dict(entry) for entry in manifest["audios"]],
+                    "init_image": None,
+                    "init_audio": None,
+                    "batch": {
+                        "source": "prompt_chain",
+                        "root": "prompt_chain",
+                        "folder": "root",
+                        "prompt_file": f"Prompt {index}",
+                        "index": index,
+                        "count": len(prompts),
+                        "folder_index": index,
+                        "folder_count": len(prompts),
+                        "uses_folder_media": False,
+                        "duration_seconds": None,
+                    },
+                })
+            batch_source = "inline"
+
+        if batch_source is not None:
             run_id = str(batch_run_id or "").strip()
             if run_id:
                 if not re.fullmatch(r"[0-9A-Za-z_-]{8,128}", run_id):
-                    raise ValueError("Folder batch sequential run ID is invalid.")
+                    raise ValueError("Sequential prompt run ID is invalid.")
                 item_index = int(batch_item_index)
                 expected_count = int(batch_item_count)
                 if expected_count != len(packs):
                     raise ValueError(
-                        "Folder batch changed after it was queued; run the folder batch again."
+                        "The prompt batch changed after it was queued; queue it again."
                     )
                 if item_index < 0 or item_index >= len(packs):
                     raise ValueError(
@@ -2146,19 +2200,19 @@ class SECoursesReferenceGallery:
                 packs = [pack]
                 prompts = [prompts[item_index]]
                 print(
-                    f"[SECoursesReferenceGallery] prepared sequential folder prompt "
+                    f"[SECoursesReferenceGallery] prepared sequential {batch_source} prompt "
                     f"{item_index + 1}/{expected_count}: {pack['batch']['prompt_file']}",
                     flush=True,
                 )
             elif int(batch_item_index) >= 0 or int(batch_item_count) > 0:
-                raise ValueError("Folder batch sequential metadata is missing its run ID.")
-            folders = len({pack["batch"]["folder"] for pack in packs})
+                raise ValueError("Sequential prompt metadata is missing its run ID.")
             if not run_id:
-                print(
-                    f"[SECoursesReferenceGallery] prepared {len(packs)} folder prompt(s) "
-                    f"across {folders} unique folder(s)",
-                    flush=True,
-                )
+                if batch_source == "folder":
+                    folders = len({pack["batch"]["folder"] for pack in packs})
+                    detail = f" across {folders} unique folder(s)"
+                else:
+                    detail = ""
+                print(f"[SECoursesReferenceGallery] prepared {len(packs)} {batch_source} prompt(s){detail}", flush=True)
             merge_flags = [bool(merge_batch_videos)] * len(packs)
             continuation_flags = [bool(continue_batch_with_last_frame)] * len(packs)
             context_values = [context_frames] * len(packs)
@@ -2270,18 +2324,23 @@ class SECoursesReferenceGallery:
             return str(error)
         try:
             root = _normalize_batch_folder(batch_folder)
-            if root is not None:
-                prompt_files = _batch_prompt_files(root)
+            chained_prompts = manifest["prompts"]
+            if root is not None and chained_prompts:
+                return "Use either Folder batch or the inline prompt chain, not both at once."
+            prompt_count = len(_batch_prompt_files(root)) if root is not None else (
+                len(chained_prompts) + 1 if chained_prompts else 0
+            )
+            if prompt_count:
                 run_id = str(batch_run_id or "").strip()
                 if run_id:
                     if not re.fullmatch(r"[0-9A-Za-z_-]{8,128}", run_id):
-                        return "Folder batch sequential run ID is invalid."
-                    if int(batch_item_count) != len(prompt_files):
-                        return "Folder batch changed after it was queued; run the folder batch again."
-                    if int(batch_item_index) < 0 or int(batch_item_index) >= len(prompt_files):
-                        return "Folder batch sequential item index is outside the prompt list."
+                        return "Sequential prompt run ID is invalid."
+                    if int(batch_item_count) != prompt_count:
+                        return "The prompt batch changed after it was queued; queue it again."
+                    if int(batch_item_index) < 0 or int(batch_item_index) >= prompt_count:
+                        return "Sequential prompt item index is outside the prompt list."
                 elif int(batch_item_index) >= 0 or int(batch_item_count) > 0:
-                    return "Folder batch sequential metadata is missing its run ID."
+                    return "Sequential prompt metadata is missing its run ID."
         except ValueError as error:
             return str(error)
         folder_paths = None
@@ -2391,8 +2450,9 @@ class SECoursesBatchContinuationFrame:
         context_frames = _continuation_context_frame_count(continuation_context_frames)
         path = _previous_batch_video(references, bool(continue_batch_with_last_frame))
         if path is None:
-            is_batch = isinstance(references, dict) and references.get("batch")
-            init_path = None if is_batch else _init_video_path(init_video)
+            batch = references.get("batch") if isinstance(references, dict) else None
+            is_folder_batch = isinstance(batch, dict) and batch.get("source") != "prompt_chain"
+            init_path = None if is_folder_batch else _init_video_path(init_video)
             if init_path is not None:
                 selected_frames = context_frames if bool(continue_batch_with_last_frame) else 1
                 print(
@@ -2404,7 +2464,7 @@ class SECoursesBatchContinuationFrame:
                     "image": _decode_last_video_frames(init_path, selected_frames),
                     "context_frames": selected_frames if bool(continue_batch_with_last_frame) else 0,
                 },)
-            if init_image is not None and not is_batch:
+            if init_image is not None and not is_folder_batch:
                 print("[SECoursesBatchContinuationFrame] using the connected init image", flush=True)
                 return ({"image": init_image, "context_frames": 0},)
             # A literal None output is treated as an unavailable dependency by

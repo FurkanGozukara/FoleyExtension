@@ -50,6 +50,11 @@
     color: #fff;
 }
 
+.secourses-refgal-add:disabled {
+    cursor: not-allowed;
+    opacity: 0.45;
+}
+
 .secourses-refgal-counter {
     color: color-mix(in srgb, var(--refgal-fg) 72%, transparent);
     font-size: 11px;
@@ -436,9 +441,81 @@ audio.secourses-refgal-media {
 
 /* ==================== Prompt box with colored token pills ==================== */
 
-.secourses-refgal-promptwrap {
+.secourses-refgal-promptlist {
+    display: flex;
     flex: 1 1 110px;
+    flex-direction: column;
+    gap: 6px;
+    max-height: 360px;
     min-height: 110px;
+    overflow-y: auto;
+}
+
+.secourses-refgal-promptrow {
+    display: flex;
+    flex: 1 0 110px;
+    flex-direction: column;
+    gap: 2px;
+    min-height: 110px;
+}
+
+.secourses-refgal-promptheader {
+    align-items: center;
+    color: color-mix(in srgb, var(--refgal-fg) 68%, transparent);
+    display: flex;
+    flex: 0 0 22px;
+    justify-content: space-between;
+    padding: 0 2px 0 6px;
+}
+
+.secourses-refgal-promptheader[hidden] {
+    display: none !important;
+}
+
+.secourses-refgal-promptlabel {
+    font-size: 10px;
+    font-weight: 700;
+}
+
+.secourses-refgal-promptrow-active .secourses-refgal-promptlabel {
+    color: #b197fc;
+}
+
+.secourses-refgal-promptcontrols {
+    display: inline-flex;
+    gap: 3px;
+}
+
+.secourses-refgal-promptcontrols button {
+    align-items: center;
+    background: transparent;
+    border: 1px solid transparent;
+    border-radius: 4px;
+    color: color-mix(in srgb, var(--refgal-fg) 70%, transparent);
+    cursor: pointer;
+    display: inline-flex;
+    font-size: 12px;
+    height: 20px;
+    justify-content: center;
+    line-height: 1;
+    padding: 0;
+    width: 20px;
+}
+
+.secourses-refgal-promptcontrols button:hover:not(:disabled) {
+    background: color-mix(in srgb, var(--refgal-bg) 75%, #7d5698);
+    border-color: #7d5698;
+    color: #fff;
+}
+
+.secourses-refgal-promptcontrols button:disabled {
+    cursor: default;
+    opacity: 0.25;
+}
+
+.secourses-refgal-promptwrap {
+    flex: 1 1 auto;
+    min-height: 88px;
     position: relative;
 }
 
@@ -631,6 +708,11 @@ audio.secourses-refgal-media {
 
 .secourses-refgal-batchpath::placeholder {
     color: color-mix(in srgb, var(--refgal-fg) 42%, transparent);
+}
+
+.secourses-refgal-batchpath:disabled {
+    cursor: not-allowed;
+    opacity: 0.5;
 }
 
 .secourses-refgal-mergetoggle {
