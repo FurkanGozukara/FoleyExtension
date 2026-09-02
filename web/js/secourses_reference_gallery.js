@@ -70,6 +70,21 @@ const REFERENCE_TYPES = {
     },
 };
 
+/**
+ * Every computed property that can move a glyph or a soft-wrap point. The pill
+ * overlay copies them off the textarea so its text lands exactly on the
+ * (transparent) text the caret is placed in.
+ */
+const OVERLAY_METRIC_PROPERTIES = [
+    "direction", "fontFamily", "fontFeatureSettings", "fontKerning", "fontOpticalSizing",
+    "fontSize", "fontSizeAdjust", "fontStretch", "fontStyle", "fontVariantCaps",
+    "fontVariantEastAsian", "fontVariantLigatures", "fontVariantNumeric", "fontWeight",
+    "hyphens", "letterSpacing", "lineHeight", "overflowWrap", "paddingBottom", "paddingLeft",
+    "paddingRight", "paddingTop", "tabSize", "textAlign", "textIndent", "textOrientation",
+    "textRendering", "textTransform", "unicodeBidi", "whiteSpace", "wordBreak", "wordSpacing",
+    "writingMode",
+];
+
 const ALIAS_TO_TYPE = {};
 for (const type in REFERENCE_TYPES) {
     for (const alias of REFERENCE_TYPES[type].aliases) {
@@ -320,6 +335,10 @@ class ReferenceGalleryUI {
     dispose() {
         this.tokenEstimator?.dispose();
         this.tokenEstimator = null;
+        for (const editor of this.promptEditors) {
+            editor.resizeObserver?.disconnect();
+            editor.resizeObserver = null;
+        }
     }
 
     /** Re-estimates the packed token count shortly (debounced; also fired by graph changes). */
@@ -490,6 +509,12 @@ class ReferenceGalleryUI {
         const overlay = document.createElement("div");
         overlay.className = "secourses-refgal-overlay";
         overlay.setAttribute("aria-hidden", "true");
+        // The pills live in an inner box that is moved with a transform to follow the
+        // textarea's scroll. Unlike scrollTop, a transform never clamps, so the overlay
+        // can never come to rest a line away from the text the caret is actually in.
+        const overlayInner = document.createElement("div");
+        overlayInner.className = "secourses-refgal-overlay-inner";
+        overlay.appendChild(overlayInner);
         const textarea = document.createElement("textarea");
         textarea.className = "secourses-refgal-prompt";
         textarea.placeholder = "Prompt — type @ to reference attachments, eg @image1 …";
@@ -503,10 +528,11 @@ class ReferenceGalleryUI {
 
         const editor = {
             row, header, label, controls, moveUp, moveDown, remove,
-            wrap, overlay, textarea, suggest,
+            wrap, overlay, overlayInner, textarea, suggest,
             suggestIndex: 0,
             suggestMatches: null,
             suggestContext: null,
+            resizeObserver: null,
         };
         this.promptEditors.push(editor);
         this.promptList.appendChild(row);
@@ -536,8 +562,21 @@ class ReferenceGalleryUI {
         textarea.addEventListener("blur", () => window.setTimeout(() => this.closeSuggestions(editor), 150));
         textarea.addEventListener("keydown", (event) => this.onPromptKeydown(event, editor));
         suggest.addEventListener("mousedown", (event) => event.preventDefault());
+        // Resizing the node re-wraps the textarea; the overlay has to be re-measured
+        // against its new content width or every pill drifts off the text again.
+        if (typeof ResizeObserver !== "undefined") {
+            editor.resizeObserver = new ResizeObserver(() => this.syncOverlayGeometry(editor));
+            editor.resizeObserver.observe(textarea);
+        }
         this.updatePromptEditorLabels();
+        this.renderOverlay(null, editor);
         return editor;
+    }
+
+    destroyPromptEditor(editor) {
+        editor.resizeObserver?.disconnect();
+        editor.resizeObserver = null;
+        editor.row.remove();
     }
 
     setPrimaryEditorAliases() {
@@ -579,7 +618,7 @@ class ReferenceGalleryUI {
         const index = this.promptEditors.indexOf(editor);
         if (index === -1) return;
         this.promptEditors.splice(index, 1);
-        editor.row.remove();
+        this.destroyPromptEditor(editor);
         if (this.activeEditor === editor) {
             this.activeEditor = this.promptEditors[Math.min(index, this.promptEditors.length - 1)];
         }
@@ -603,7 +642,7 @@ class ReferenceGalleryUI {
     }
 
     setAdditionalPrompts(prompts) {
-        for (const editor of this.promptEditors.slice(1)) editor.row.remove();
+        for (const editor of this.promptEditors.slice(1)) this.destroyPromptEditor(editor);
         this.promptEditors.splice(1);
         for (const prompt of prompts) this.createPromptEditor(prompt);
         this.setPrimaryEditorAliases();
@@ -1527,9 +1566,46 @@ class ReferenceGalleryUI {
 
     // ==================== Colored pill overlay ====================
 
+    /**
+     * Mirrors the textarea's text metrics and content box onto the overlay.
+     *
+     * The overlay only lines up with the invisible text if it wraps at exactly the
+     * same column. It already covers the textarea's border box (both fill the wrap),
+     * so copying the textarea's border widths puts their content boxes on the same
+     * subpixel, and clientWidth gives the text column in layout pixels: it excludes
+     * the border and the scrollbar gutter, and (unlike getBoundingClientRect) ignores
+     * the canvas zoom transform ComfyUI puts on the DOM widget layer.
+     */
+    syncOverlayGeometry(editor = this.promptEditors[0]) {
+        const box = editor.textarea;
+        const inner = editor.overlayInner;
+        // Before the node is laid out (and while a collapsed DOM widget has no size)
+        // there is nothing to measure; the ResizeObserver re-runs this on the first
+        // real size.
+        if (!box.clientWidth) {
+            this.syncOverlayScroll(editor);
+            return;
+        }
+        const style = getComputedStyle(box);
+        // Every property that can move a glyph or a wrap point has to match, or the
+        // pills drift away from the text and the caret lands on the wrong character.
+        for (const property of OVERLAY_METRIC_PROPERTIES) inner.style[property] = style[property];
+        editor.overlay.style.borderTopWidth = style.borderTopWidth;
+        editor.overlay.style.borderRightWidth = style.borderRightWidth;
+        editor.overlay.style.borderBottomWidth = style.borderBottomWidth;
+        editor.overlay.style.borderLeftWidth = style.borderLeftWidth;
+        inner.style.width = `${box.clientWidth}px`;
+        // A right-to-left textarea keeps its scrollbar gutter on the left instead, so
+        // its text column starts that much further in.
+        const gutter = Math.max(0, box.offsetWidth - box.clientWidth
+            - (parseFloat(style.borderLeftWidth) || 0) - (parseFloat(style.borderRightWidth) || 0));
+        inner.style.marginLeft = style.direction === "rtl" ? `${gutter}px` : "0px";
+        this.syncOverlayScroll(editor);
+    }
+
     syncOverlayScroll(editor = this.promptEditors[0]) {
-        editor.overlay.scrollTop = editor.textarea.scrollTop;
-        editor.overlay.scrollLeft = editor.textarea.scrollLeft;
+        editor.overlayInner.style.transform =
+            `translate(${-editor.textarea.scrollLeft}px, ${-editor.textarea.scrollTop}px)`;
     }
 
     renderAllOverlays() {
@@ -1539,6 +1615,11 @@ class ReferenceGalleryUI {
     renderOverlay(caretIndex = null, editor = this.promptEditors[0]) {
         const text = editor.textarea.value;
         const counts = this.counts();
+        // Fold the extra Unicode forms JavaScript case-insensitive matching does not
+        // equate with ASCII, so the pills mark exactly what reference_gallery_nodes.py
+        // will translate. Every replacement is one UTF-16 code unit, so match offsets
+        // still address the user's own text.
+        const matchText = text.replace(/[İı]/g, "i").replace(/ſ/g, "s");
         const tokenRegex = /(?<![\w@])@[ \t]*(image|img|picture|pic|video|vid|audio|aud|sound)[ \t]*#?[ \t]*(\d{1,2})(?![0-9a-zA-Z])|<[ \t]*(image|img|picture|pic|video|vid|audio|aud|sound)[ \t]*#?[ \t]*(\d{1,2})[ \t]*>/gi;
         let html = "";
         let last = 0;
@@ -1554,7 +1635,7 @@ class ReferenceGalleryUI {
                 html += escapeHtml(chunk);
             }
         };
-        while ((match = tokenRegex.exec(text)) !== null) {
+        while ((match = tokenRegex.exec(matchText)) !== null) {
             emitPlain(match.index);
             last = match.index + match[0].length;
             let type, n;
@@ -1585,11 +1666,13 @@ class ReferenceGalleryUI {
             }
             const cls = valid ? "secourses-refgal-pill" : "secourses-refgal-pill secourses-refgal-pill-invalid";
             const style = valid ? ` style="--ref-color:${color};"` : "";
-            html += `<span class="${cls}"${style}>${escapeHtml(match[0])}</span>`;
+            html += `<span class="${cls}"${style}>${escapeHtml(text.substring(match.index, last))}</span>`;
         }
         emitPlain(text.length);
-        editor.overlay.innerHTML = html + "​";
-        this.syncOverlayScroll(editor);
+        // A textarea keeps an empty last line after a trailing newline; a block box
+        // does not, so pin one down and the two stay exactly the same height.
+        editor.overlayInner.innerHTML = html + "​";
+        this.syncOverlayGeometry(editor);
     }
 
     // ==================== '@' autocomplete ====================
@@ -1676,8 +1759,12 @@ class ReferenceGalleryUI {
         const marker = editor.overlay.querySelector(".secourses-refgal-caret-marker");
         if (!marker) return;
         const lineHeight = parseFloat(getComputedStyle(editor.textarea).lineHeight) || 16;
-        let top = marker.offsetTop - editor.textarea.scrollTop + lineHeight + 2;
-        let left = marker.offsetLeft - editor.textarea.scrollLeft;
+        // The marker's offsets are relative to the overlay's content box; add the
+        // overlay's own position and border back to land in the wrap's coordinates.
+        let top = editor.overlay.offsetTop + editor.overlay.clientTop + marker.offsetTop
+            - editor.textarea.scrollTop + lineHeight + 2;
+        let left = editor.overlay.offsetLeft + editor.overlay.clientLeft + marker.offsetLeft
+            - editor.textarea.scrollLeft;
         const maxLeft = Math.max(0, editor.wrap.clientWidth - 240);
         left = Math.min(Math.max(0, left), maxLeft);
         top = Math.min(Math.max(0, top), editor.wrap.clientHeight - 8);

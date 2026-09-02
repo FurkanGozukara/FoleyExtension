@@ -520,26 +520,30 @@ audio.secourses-refgal-media {
 }
 
 .secourses-refgal-prompt,
-.secourses-refgal-overlay {
-    border: 1px solid var(--refgal-border);
-    border-radius: 6px;
+.secourses-refgal-overlay-inner {
     font-family: sans-serif;
     font-size: 12px;
     line-height: 1.4;
     overflow-wrap: break-word;
     padding: 6px 8px;
+    white-space: pre-wrap;
     word-break: normal;
 }
 
 .secourses-refgal-prompt {
     background: var(--refgal-bg);
+    border: 1px solid var(--refgal-border);
+    border-radius: 6px;
     caret-color: var(--refgal-fg);
     color: transparent;
     height: 100%;
     outline: none;
     overflow-y: auto;
     resize: none;
-    white-space: pre-wrap;
+    /* Reserve the scrollbar gutter at all times. The overlay mirrors this box's
+       content width, and a gutter that only appears once the prompt overflows
+       would otherwise re-wrap every line in the middle of a keystroke. */
+    scrollbar-gutter: stable;
     width: 100%;
 }
 
@@ -556,16 +560,31 @@ audio.secourses-refgal-media {
     border-color: #7d5698;
 }
 
+/* The overlay is clipped to the textarea's content box - JS mirrors that box's
+   geometry and text metrics onto it - and its text is moved with a transform
+   rather than scrollTop, which would clamp and leave the pills a line away from
+   the text the caret is really in. */
 .secourses-refgal-overlay {
     background: transparent;
     border-color: transparent;
-    color: var(--refgal-fg);
+    border-style: solid;
+    /* JS copies the textarea's own border widths here, so the two content boxes
+       land on the same subpixel at every canvas zoom level. */
+    border-width: 0;
     inset: 0;
+    margin: 0;
     overflow: hidden;
+    padding: 0;
     pointer-events: none;
     position: absolute;
-    white-space: pre-wrap;
     z-index: 2;
+}
+
+.secourses-refgal-overlay-inner {
+    border: 0;
+    color: var(--refgal-fg);
+    margin: 0;
+    min-height: 100%;
 }
 
 .secourses-refgal-pill {
