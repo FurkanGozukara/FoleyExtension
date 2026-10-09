@@ -3166,7 +3166,12 @@ class SECoursesMiniMaxH3References:
 
         if translated != prompt:
             print(f"[SECoursesMiniMaxH3References] prompt for the model: {translated}", flush=True)
-        output = MiniMaxH3ReferenceToVideo.execute(
+        encode = MiniMaxH3ReferenceToVideo.execute
+        if references.get("refmods"):
+            from functools import partial
+            from .refmod_nodes import encode_with_refmods
+            encode = partial(encode_with_refmods, MiniMaxH3ReferenceToVideo, references["refmods"])
+        output = encode(
             clip=clip, vae=vae, audio_vae=audio_vae, prompt=translated,
             width=width, height=height, length=length, ref_image_size=ref_image_size,
             ref_images=ref_images or None, ref_videos=ref_videos or None,
@@ -3212,7 +3217,7 @@ class SECoursesMiniMaxH3ReferenceMode:
     def detect(self, references, init_video=None):
         if not isinstance(references, dict):
             raise ValueError("The references input must come from a SECourses Reference Gallery node.")
-        has_references = any(references.get(kind) for kind in ("images", "videos", "audios"))
+        has_references = any(references.get(kind) for kind in ("images", "videos", "audios", "refmods"))
         return (
             has_references,
             has_references or bool(references.get("batch")) or _init_video_path(init_video) is not None,
@@ -3340,7 +3345,7 @@ class SECoursesMiniMaxH3Auto:
                 f"[SECoursesMiniMaxH3Auto] using folder-batch init image '{init_image['name']}'.",
                 flush=True,
             )
-        has_references = any(references.get(kind) for kind in ("images", "videos", "audios"))
+        has_references = any(references.get(kind) for kind in ("images", "videos", "audios", "refmods"))
         native_video_context = continuation_frame is not None and continuation_context_frames > 1
         if native_video_context and int(length) <= continuation_context_frames:
             raise ValueError(

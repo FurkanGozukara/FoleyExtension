@@ -3,6 +3,47 @@
 SECourses custom nodes for ComfyUI, installed automatically by the SECourses
 ComfyUI installers into `ComfyUI/StandaloneCustomNodes/FoleyExtension`.
 
+## Optional MiniMax H3 RefMods
+
+The updated H3 presets include **MiniMax H3 Optional RefMods**. Leave it empty
+for the existing workflow, or click **Add RefMod** / **Import files** and select
+portable `.safetensors` references. Files live in `ComfyUI/models/refmods`; VAE
+model folders also expose their sibling `refmods` directory, including SwarmUI's
+`Models/refmods`. Click **Refresh** after adding or building a file.
+
+Each row has its own enable checkbox, strength (0 disables it), and component
+filter (`all`, `visual`, `audio`). Mention `@refmod1`, `@refmod2`, etc. in the
+prompt. A bundle can supply several picture/video/audio labels; they are numbered
+after the normal gallery attachments. Disabled rows retain their row number.
+There is no fixed file-slot limit; available memory and the model's context budget
+limit practical use. The picker shows the extra reference tokens separately from
+the gallery's estimate. Strength controls retained reference detail, not LoRA weight.
+
+Use **MiniMax H3 RefMod Builder - Images Video Audio** to create a file. Add source
+photos, video, audio, or a mixture to its gallery, choose a name, and Run. Only the
+video/audio VAEs run. **One character** stacks photos as one visual reference;
+**Separate references** keeps each as a picture. Start with resolution 512 and
+compression **none**. Optional spatial pooling saves tokens at the cost of detail;
+this builder does not train model weights or optimize the latent with gradients.
+Videos use the gallery's duration/trim controls and include their soundtrack.
+Existing files are preserved with numbered names. One portable bundle holds up to
+256 members; additional files can be selected together at generation time.
+
+Supported files: MiniMaxH3Mod standalone v4/legacy metadata, v5 bundles, and
+Fantastic standalone files with embedded JPEG encoder frames. New bundles are
+readable by both upstream projects. No extra third-party node installation is
+required; provenance is in [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md).
+
+Works with the image, video, audio-only and native long lip-sync presets, including
+ordinary media references and optional face refinement. For audio-only generation,
+select the **audio** component of a mixed bundle. The **TaoMate Streaming** sampler
+does not consume `minimax_refs`; use **Native Latent Continuation** for long videos
+with RefMods. Reference conditioning does not guarantee exact identity or voice.
+
+SwarmUI uses the same backend through MiniMaxH3References 1.19.0 or later. Enable
+**MiniMax H3 RefMods**, select files in its picker, and use the same prompt tokens.
+Its builder preset also creates files from the prompt's media attachments.
+
 ## SECourses Reference Gallery
 
 SwarmUI-style dynamic media references for reference-driven models such as
