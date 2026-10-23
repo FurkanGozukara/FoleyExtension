@@ -290,6 +290,8 @@ export const NODE_EVALUATORS = {
     LoadImage: async (ctx, node, slot) => (slot === 0 ? imageDescriptor(await ctx.input(node, "image")) : undefined),
     SECoursesLoadImage: async (ctx, node, slot) => initMediaDescriptor(await ctx.input(node, "image"), slot),
     SECoursesOptionalImage: async (ctx, node) => imageDescriptor(await ctx.input(node, "image")),
+    // the gallery's references pass through; the RefMod media it adds are not counted
+    SECoursesH3RefModStack: (ctx, node) => ctx.input(node, "references"),
     SECoursesBatchContinuationFrame: async (ctx, node) => {
         const pack = await ctx.input(node, "references");
         if (pack?.batchActive) {

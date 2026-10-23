@@ -183,6 +183,19 @@ test("auto-routed preset shape: single runs with references take the auto adapte
     assert.equal(result.label, "reference to video");
 });
 
+test("references reach the auto adapter through the optional RefMods stack", async () => {
+    const refs = JSON.stringify({ images: [{ file: "reference_gallery/a.png [input]", name: "a.png" }], videos: [], audios: [] });
+    const prompt = textToVideoPrompt({ duration: 5, refs, router: "auto" });
+    prompt["429"] = { inputs: { selection: "[]", references: ["119", 0] }, class_type: "SECoursesH3RefModStack" };
+    prompt["121:135"].inputs.references = ["429", 0];
+    const result = await estimateFromPrompt(prompt, 119);
+    assert.ok(result.estimate, result.reason);
+    const expectedRef = H3.estimate({ width: 864, height: 480, frames: 124, refImages: [{ width: 1920, height: 1080 }], pipeline: "secourses" }).parts.refImages;
+    assert.equal(result.estimate.parts.refImages, expectedRef);
+    assert.equal(result.estimate.approximate, false);
+    assert.equal(result.label, "reference to video");
+});
+
 test("auto-routed preset shape: no references and no batch keeps the normal route", async () => {
     const result = await estimateFromPrompt(textToVideoPrompt({ duration: 5, router: "auto" }), 119);
     assert.ok(result.estimate, result.reason);
