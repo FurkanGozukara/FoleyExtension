@@ -231,6 +231,65 @@ function parseManifest(value) {
     return { images: list("images"), videos: list("videos"), audios: list("audios") };
 }
 
+// ==================== MiniMax H3 Genjutsu (genjutsu_nodes.py) ====================
+
+export const GENJUTSU_CLASS = "SECoursesH3Genjutsu";
+const GENJUTSU_DECODE_AREA_CAP = 768 * 1344; // reference_gallery_nodes.VIDEO_DECODE_AREA_CAP
+// Text tokens the Genjutsu template, the Auto Describe fields and the background rules add to a prompt that is not a
+// complete H3 prompt: 847 on the shadowboxing example (video background, Auto Describe); the description varies it.
+export const GENJUTSU_TEMPLATE_TOKENS = 850;
+
+/** usable_frame_count: the largest MiniMax H3 length (17k + 5) that fits `frames` source frames; null below 5. */
+export function genjutsuUsableFrames(frames) {
+    const count = Math.trunc(Number(frames));
+    return Number.isFinite(count) && count >= 5 ? count - ((count - 5) % 17) : null;
+}
+
+/** source_aspect_size: the pixel area of width x height with the clip's aspect ratio, on the 32 px grid. */
+export function genjutsuOutputSize(width, height, sourceWidth, sourceHeight) {
+    const area = width * height;
+    const ratio = sourceWidth / sourceHeight;
+    return [
+        Math.max(H3.CANVAS_MULTIPLE, H3.pyRound(Math.sqrt(area * ratio) / H3.CANVAS_MULTIPLE) * H3.CANVAS_MULTIPLE),
+        Math.max(H3.CANVAS_MULTIPLE, H3.pyRound(Math.sqrt(area / ratio) / H3.CANVAS_MULTIPLE) * H3.CANVAS_MULTIPLE),
+    ];
+}
+
+/** _guide_size: the motion guide's size, like ImageScaleToTotalPixels. */
+export function genjutsuGuideSize(width, height, megapixels) {
+    const scale = Math.sqrt((megapixels * 1024 * 1024) / (width * height));
+    return [Math.max(1, H3.pyRound(width * scale)), Math.max(1, H3.pyRound(height * scale))];
+}
+
+/** is_full_prompt: a complete MiniMax H3 prompt is used as written. */
+export function isFullH3Prompt(text) {
+    return /subject[ _]definitions[\s*_`]*:/i.test(String(text || ""));
+}
+
+/**
+ * SECoursesH3Genjutsu.prepare without running it: @video1 becomes the motion guide (guide_megapixels, as long as the
+ * output) and the output takes the clip's usable length at 24 FPS (trim window and max_seconds included) and, with
+ * match_source_aspect, the clip's aspect ratio. Returns null when the clip's size or length is unknown.
+ */
+async function genjutsuPlan(ctx, node) {
+    const pack = await ctx.input(node, "references");
+    const clip = pack?.videos?.[0];
+    if (!clip || !(clip.width > 0 && clip.height > 0) || (clip.duration == null && clip.trimEnd == null)) return null;
+    const window = H3.trimWindow(clip, pack.maxSeconds ?? 15);
+    const length = genjutsuUsableFrames(H3.pyRound(window.seconds * H3.FPS));
+    if (length == null) return null;
+    const [decodedWidth, decodedHeight] = H3.fitDimensions(clip.width, clip.height, GENJUTSU_DECODE_AREA_CAP);
+    let width = asNumber(await ctx.input(node, "width"));
+    let height = asNumber(await ctx.input(node, "height"));
+    if (width != null && height != null && asBool(await ctx.input(node, "match_source_aspect")) !== false) {
+        [width, height] = genjutsuOutputSize(width, height, decodedWidth, decodedHeight);
+    }
+    const [guideWidth, guideHeight] = genjutsuGuideSize(decodedWidth, decodedHeight,
+        asNumber(await ctx.input(node, "guide_megapixels")) ?? 0.15);
+    const guide = { ...clip, width: guideWidth, height: guideHeight, duration: length / H3.FPS, trimStart: null, trimEnd: null };
+    return { pack: { ...pack, genjutsu: true, videos: [guide, ...pack.videos.slice(1)] }, width, height, length };
+}
+
 /**
  * Node evaluators: class -> async (ctx, node, slot) => value. `ctx.input(node, name)` resolves an
  * input (widget value or upstream link). Unknown classes resolve to `undefined`.
@@ -329,6 +388,19 @@ export const NODE_EVALUATORS = {
         const image = await ctx.input(node, "image");
         if (!image) return null;
         return slot === 0 ? image.width : slot === 1 ? image.height : 1;
+    },
+    // outputs: references, prompt, width, height, length (the rest are not counted)
+    [GENJUTSU_CLASS]: async (ctx, node, slot) => {
+        if (slot === 1) {
+            const override = await ctx.input(node, "prompt_override");
+            if (typeof override === "string" && override.trim()) return override;
+            return (await ctx.input(node, "references"))?.prompt ?? "";
+        }
+        if (slot > 4) return undefined;
+        const plan = await genjutsuPlan(ctx, node);
+        if (slot === 0) return plan ? plan.pack : ctx.input(node, "references");
+        if (!plan) return null;
+        return slot === 2 ? plan.width : slot === 3 ? plan.height : plan.length;
     },
     SECoursesMiniMaxH3ReferenceMode: async (ctx, node, slot) => {
         const pack = await ctx.input(node, "references");
@@ -602,6 +674,11 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
             audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "secourses",
         };
         label = audioOnly ? "audio only with references" : "reference to video";
+        if (pack?.genjutsu) {
+            // the Genjutsu node writes the template (Auto Describe fields, background rules) around short notes
+            if (!isFullH3Prompt(prompt)) spec.textTokens = H3.textTokens(prompt) + GENJUTSU_TEMPLATE_TOKENS;
+            label = "Genjutsu character swap";
+        }
     } else {
         spec = {
             width: canvas.width, height: canvas.height, frames: canvas.length, prompt,

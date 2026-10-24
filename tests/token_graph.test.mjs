@@ -3,9 +3,12 @@ import test from "node:test";
 
 import "../web/js/minimax_h3_tokens.js";
 import {
+    GENJUTSU_TEMPLATE_TOKENS,
     PromptResolver,
     estimateFromPrompt,
     evaluateMathExpression,
+    genjutsuGuideSize,
+    genjutsuUsableFrames,
     initAudioTrimmedDuration,
     selectMentioned,
     setMediaInfoProvider,
@@ -351,6 +354,50 @@ test("core reference node (SwarmUI-style workflow): image loaders and a LoadVide
         refImages: [{ width: 640, height: 640 }], refVideos: [{ width: 1920, height: 1080, duration: 8, hasAudio: true }],
     });
     assert.equal(result.estimate.total, expected.total);
+});
+
+test("Genjutsu preset: clip length and aspect, the guide as @video1, the template's text", async () => {
+    // the shadowboxing example: a 9.834 s portrait clip at 1080x1920 with audio, and a portrait character image
+    MEDIA["reference_gallery/boxer.mp4 [input]"] = { kind: "video", width: 1080, height: 1920, duration: 9.834, has_audio: true };
+    const refs = (video) => JSON.stringify({ images: [{ file: "reference_gallery/b.jpg [input]", name: "b.jpg" }], videos: [video] });
+    const clip = { file: "reference_gallery/boxer.mp4 [input]", name: "boxer.mp4" };
+    const output = {
+        "400": gallery({ references: refs(clip), prompt: "Every movement matches <Video 1>." }),
+        "115": { inputs: { aspect_ratio: "16:9 (Widescreen)", megapixels: 0.98, width: 1344, height: 768, multiple: 32 }, class_type: "SECoursesResolutionSync" },
+        "504": { inputs: { references: ["400", 0], sam3_model: ["500", 0], sam3_clip: ["500", 1], target: "person", background: "video (character replacement)", guide_megapixels: 0.15, threshold: 0.5, mask_grow: 0, width: ["115", 0], height: ["115", 1], match_source_aspect: true, speech: "", speech_language: "English", refine_iterations: 2 }, class_type: "SECoursesH3Genjutsu" },
+        "136": { inputs: { clip: ["1", 0], vae: ["2", 0], audio_vae: ["3", 0], references: ["504", 0], prompt_override: ["504", 1], width: ["504", 2], height: ["504", 3], length: ["504", 4], ref_image_size: "match" }, class_type: "SECoursesMiniMaxH3Auto" },
+        "50": { inputs: { model: ["4", 0], conditioning: ["136", 0] }, class_type: "BasicGuider" },
+        "51": { inputs: { guider: ["50", 0], latent_image: ["136", 1] }, class_type: "SamplerCustomAdvanced" },
+        "52": { inputs: { samples: ["51", 0], vae: ["2", 0] }, class_type: "VAEDecode" },
+        "53": { inputs: { images: ["52", 0], fps: 24 }, class_type: "SaveVideo" },
+    };
+    // the clip decodes at 768x1344 (24 FPS, 236 frames -> 226), the 0.15 MP guide is 300x525: as in the ComfyUI log
+    assert.deepEqual(H3.fitDimensions(1080, 1920, 768 * 1344), [768, 1344]);
+    assert.deepEqual(genjutsuGuideSize(768, 1344, 0.15), [300, 525]);
+    assert.equal(genjutsuUsableFrames(236), 226);
+    assert.equal(genjutsuUsableFrames(4), null);
+    const result = await estimateFromPrompt(output, 400);
+    assert.ok(result.estimate, result.reason);
+    assert.equal(result.label, "Genjutsu character swap");
+    assert.deepEqual([result.estimate.width, result.estimate.height, result.estimate.frames], [768, 1344, 226]);
+    const expected = H3.estimate({
+        width: 768, height: 1344, frames: 226, pipeline: "secourses", refImageSize: "match", maxSeconds: 15,
+        textTokens: H3.textTokens("Every movement matches <Video 1>.") + GENJUTSU_TEMPLATE_TOKENS,
+        refImages: [{ width: 1080, height: 1920 }],
+        refVideos: [{ width: 300, height: 525, duration: 226 / 24, hasAudio: true }],
+    });
+    assert.equal(result.estimate.total, expected.total);
+
+    // a trim window sets the length; a complete H3 prompt is counted as written; aspect matching off keeps the size
+    output["400"] = gallery({ references: refs({ ...clip, trim_start: 1, trim_end: 5.5 }), prompt: "subject_definitions:\n<Subject 1> is the man." });
+    output["504"].inputs.match_source_aspect = false;
+    const trimmed = await estimateFromPrompt(output, 400);
+    assert.deepEqual([trimmed.estimate.width, trimmed.estimate.height, trimmed.estimate.frames], [1344, 768, 107]);
+    assert.equal(trimmed.estimate.parts.text, H3.estimate({
+        width: 1344, height: 768, frames: 107, prompt: "subject_definitions:\n<Subject 1> is the man.", pipeline: "secourses",
+        refImages: [{ width: 1080, height: 1920 }], refVideos: [{ width: 300, height: 525, duration: 107 / 24, hasAudio: true }],
+    }).parts.text);
+    delete MEDIA["reference_gallery/boxer.mp4 [input]"];
 });
 
 test("no active conditioning node -> unavailable with a reason", async () => {
