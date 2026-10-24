@@ -3,6 +3,45 @@
 SECourses custom nodes for ComfyUI, installed automatically by the SECourses
 ComfyUI installers into `ComfyUI/StandaloneCustomNodes/FoleyExtension`.
 
+## MiniMax H3 Genjutsu (character swap)
+
+The **MiniMax H3 Genjutsu** presets replace the person in a video with the
+character of an image. Add the clip to the Reference Gallery (it is `@video1`;
+Load + trim picks the part to use) and one image of the new character
+(`@image1`), leave the prompt empty and Run. The result keeps the clip's motion,
+timing, camera, lip movements, length, aspect ratio and original soundtrack.
+
+- **MiniMax H3 Genjutsu (Gallery)** (`SECoursesH3Genjutsu`) runs SAM 3.1
+  (`sam3.1_multiplex_fp16.safetensors`, Load Checkpoint) on every frame of
+  `@video1` and inverts only the performer's colours, so MiniMax H3 Ref2VA
+  copies the motion but not the identity or costume (the inverted motion guide
+  of MDMZ's H3 Character Swap workflow). The guide replaces `@video1` in the pack
+  (its soundtrack stays paired); the node also returns the output length (the
+  clip's frames on the 17k+5 grid), a size with the clip's aspect ratio, the
+  clip's soundtrack for the final video and two preview batches (the mask in red
+  and the guide). `background`: `video` keeps the clip's location, lighting and
+  framing (character replacement), `image` puts the inverted performer on grey
+  and keeps the character image's environment (motion transfer). Frames where
+  SAM 3.1 misses the performer borrow the nearest detected mask (up to 6 frames).
+- **Auto Describe**: connect a text encoder that can generate text with images,
+  eg Qwen3-VL 8B (`qwen3vl_8b_int8_convrot.safetensors`, CLIP type
+  `stable_diffusion`), to `describe_clip`. When the prompt is not a complete
+  MiniMax H3 prompt, it describes the character image and six frames of the clip
+  (greedy, so repeatable) and fills the Genjutsu template with the outfit, the
+  action, the setting, the lighting, the framing and whether the performer
+  speaks. Short notes in the prompt are added to the shot; `speech` takes the
+  spoken words for word-by-word lip sync. Without a description the performer's
+  costume can carry over; in our tests the described prompt fixed that in every
+  seed.
+- A complete MiniMax H3 prompt (with `subject_definitions:`, eg an LLM's answer
+  to the Genjutsu section of `MiniMax_H3_Enchance_Prompt_Feed_For_LLMs.txt`) is
+  used as written after tidying (code fences, markdown headings).
+- Both cases get the background rules of the source workflow (its RegexReplace
+  chain, reproduced exactly; `tests/test_genjutsu.py` checks the parity).
+- **MiniMax H3 Genjutsu Motion Guide (SAM 3.1)** and **MiniMax H3 Genjutsu
+  Prompt** do the same from decoded frames and a prompt string; SwarmUI's
+  MiniMaxH3References extension builds its Genjutsu graph from them.
+
 ## Optional MiniMax H3 RefMods
 
 The updated H3 presets include **MiniMax H3 Optional RefMods**. Leave it empty

@@ -1908,8 +1908,14 @@ def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=Non
     for entry in entries:
         path = _resolve_reference_entry(entry)
         source_width, source_height, has_audio = _video_metadata(path)
+        # Frames computed by an earlier node (the MiniMax H3 Genjutsu motion guide) replace the file's picture;
+        # the file still provides the soundtrack.
+        frames = entry.get("frames")
         target_size = None
-        if source_width and source_height:
+        if frames is not None:
+            source_width, source_height = int(frames.shape[2]), int(frames.shape[1])
+            target_size = (source_width, source_height)
+        elif source_width and source_height:
             target_size = _fit_dimensions(source_width, source_height, area_cap)
         trim_start, trim_seconds = _entry_trim_window(entry, max_seconds)
         entry_frames = min(max_frames, max(1, round(trim_seconds * max(1.0, float(fps)))))
@@ -1926,6 +1932,7 @@ def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=Non
             "audio_seconds": min(audio_seconds, trim_seconds),
             "trim_start": trim_start,
             "has_audio": has_audio,
+            "frames": frames,
         })
     return specs
 
@@ -1978,6 +1985,15 @@ class _LazyVideoReferences:
         import torch
 
         for index, spec in enumerate(self.specs):
+            if spec.get("frames") is not None:
+                frames = spec["frames"][:spec["max_frames"]]
+                if frames.shape[0] < 5:
+                    raise ValueError(
+                        f"Reference video {index + 1} ('{spec['name']}') has fewer than 5 usable frames "
+                        "(~0.2s at 24 fps)."
+                    )
+                yield f"ref_video_{index}", frames
+                continue
             _log_media_resize("video", spec["name"], spec["source_size"], spec["target_size"])
             uint8_frames = _decode_video_frames(
                 spec["path"],
