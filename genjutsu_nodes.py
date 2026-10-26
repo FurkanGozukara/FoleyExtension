@@ -25,9 +25,10 @@ try:
         VIDEO_DECODE_AREA_CAP,
         _decode_video_audio,
         _decode_video_frames,
+        _entry_image_dimensions,
         _entry_trim_window,
-        _load_reference_image,
-        _oriented_image_dimensions,
+        _is_external_entry,
+        _load_entry_image,
         _resolve_reference_entry,
     )
 except ImportError:  # direct test-module import
@@ -36,9 +37,10 @@ except ImportError:  # direct test-module import
         VIDEO_DECODE_AREA_CAP,
         _decode_video_audio,
         _decode_video_frames,
+        _entry_image_dimensions,
         _entry_trim_window,
-        _load_reference_image,
-        _oriented_image_dimensions,
+        _is_external_entry,
+        _load_entry_image,
         _resolve_reference_entry,
     )
 
@@ -640,20 +642,28 @@ class SECoursesH3Genjutsu:
                 "(Load + trim selects the part to use)."
             )
         entry = videos[0]
-        path = _resolve_reference_entry(entry)
+        external = _is_external_entry(entry)
+        path = None if external else _resolve_reference_entry(entry)
         fps = max(1.0, float(references.get("video_fps", FPS)))
         if abs(fps - FPS) > 1e-6:
             raise ValueError(f"MiniMax H3 Genjutsu needs the gallery's video_fps at {FPS}; it is {fps:g}.")
         trim_start, seconds = _entry_trim_window(entry, float(references.get("max_seconds", 15.0)))
-        frames = _decode_video_frames(path, fps, max_frames=max(1, round(seconds * fps)),
-                                      area_cap=VIDEO_DECODE_AREA_CAP, trim_start=trim_start)
+        if external:
+            # An image sequence from the gallery's external_video input (already uint8, area-capped).
+            frames = entry["external_frames"][:max(1, round(seconds * fps))]
+        else:
+            frames = _decode_video_frames(path, fps, max_frames=max(1, round(seconds * fps)),
+                                          area_cap=VIDEO_DECODE_AREA_CAP, trim_start=trim_start)
         length = usable_frame_count(frames.shape[0])
         frames = frames[:length]
         guide, masks, _missed = build_motion_guide(
             frames, sam3_model, sam3_clip, target, background, guide_megapixels, threshold, refine_iterations, mask_grow,
         )
         mask_preview, guide_preview = guide_previews(frames, masks, guide)
-        source_audio = _decode_video_audio(path, length / fps, trim_start=trim_start)
+        if external:
+            source_audio = cut_audio(entry.get("audio"), length / fps)
+        else:
+            source_audio = _decode_video_audio(path, length / fps, trim_start=trim_start)
 
         prompt = references.get("prompt") or ""
         if prompt_override is not None and str(prompt_override).strip():
@@ -661,10 +671,9 @@ class SECoursesH3Genjutsu:
         character = None
         images = references.get("images") or []
         if describe_clip is not None and images and not is_full_prompt(prompt):
-            character_path = _resolve_reference_entry(images[0])
-            source_width, source_height, _orientation = _oriented_image_dimensions(character_path)
-            character = _load_reference_image(
-                character_path, *_guide_size(source_width, source_height, DESCRIBE_CHARACTER_MEGAPIXELS))
+            source_width, source_height, _orientation = _entry_image_dimensions(images[0])
+            character = _load_entry_image(
+                images[0], *_guide_size(source_width, source_height, DESCRIBE_CHARACTER_MEGAPIXELS))
         prompt = build_prompt(prompt, background, describe_clip, frames, character, speech, speech_language,
                               has_audio=source_audio is not None)
         if match_source_aspect:
