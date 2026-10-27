@@ -2990,6 +2990,24 @@ class SECoursesBatchAudioSaveMerge:
         return {"ui": {"audio": preview}, "result": (display_audio,)}
 
 
+class _H3StereoAudioVAE:
+    """Native H3 packs two audio channels, including mono reference uploads."""
+
+    def __init__(self, vae):
+        self.vae = vae
+
+    def __getattr__(self, name):
+        return getattr(self.vae, name)
+
+    def encode(self, samples):
+        # VAE input is [batch, samples, channels]. Keep stereo byte-identical.
+        if samples.shape[-1] == 1:
+            samples = samples.expand(-1, -1, 2)
+        elif samples.shape[-1] > 2:
+            samples = samples.mean(dim=-1, keepdim=True).expand(-1, -1, 2)
+        return self.vae.encode(samples)
+
+
 class SECoursesMiniMaxH3References:
     MAX_IMAGES = 9
     MAX_VIDEOS = 3
@@ -3188,7 +3206,7 @@ class SECoursesMiniMaxH3References:
             from .refmod_nodes import encode_with_refmods
             encode = partial(encode_with_refmods, MiniMaxH3ReferenceToVideo, references["refmods"])
         output = encode(
-            clip=clip, vae=vae, audio_vae=audio_vae, prompt=translated,
+            clip=clip, vae=vae, audio_vae=_H3StereoAudioVAE(audio_vae) if audio_vae is not None else None, prompt=translated,
             width=width, height=height, length=length, ref_image_size=ref_image_size,
             ref_images=ref_images or None, ref_videos=ref_videos or None,
             ref_video_audios=ref_video_audios or None, ref_audios=ref_audios or None,

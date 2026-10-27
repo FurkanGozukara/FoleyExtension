@@ -234,6 +234,7 @@ function parseManifest(value) {
 // ==================== MiniMax H3 Genjutsu (genjutsu_nodes.py) ====================
 
 export const GENJUTSU_CLASS = "SECoursesH3Genjutsu";
+const GENJUTSU_ALIGNED = "aligned guide + task LoRA";
 const GENJUTSU_DECODE_AREA_CAP = 768 * 1344; // reference_gallery_nodes.VIDEO_DECODE_AREA_CAP
 // Text tokens the Genjutsu template, the Auto Describe fields and the background rules add to a prompt that is not a
 // complete H3 prompt: 847 on the shadowboxing example (video background, Auto Describe); the description varies it.
@@ -287,7 +288,9 @@ async function genjutsuPlan(ctx, node) {
     const [guideWidth, guideHeight] = genjutsuGuideSize(decodedWidth, decodedHeight,
         asNumber(await ctx.input(node, "guide_megapixels")) ?? 0.15);
     const guide = { ...clip, width: guideWidth, height: guideHeight, duration: length / H3.FPS, trimStart: null, trimEnd: null };
-    return { pack: { ...pack, genjutsu: true, videos: [guide, ...pack.videos.slice(1)] }, width, height, length };
+    const aligned = (await ctx.input(node, "method")) === GENJUTSU_ALIGNED;
+    return { pack: { ...pack, genjutsu: true, videos: aligned ? pack.videos.slice(1) : [guide, ...pack.videos.slice(1)] },
+        width, height, length, clip, alignedGuide: aligned ? { ...clip, kind: "video", frames: length, duration: length / H3.FPS } : null };
 }
 
 /**
@@ -391,15 +394,21 @@ export const NODE_EVALUATORS = {
     },
     // outputs: references, prompt, width, height, length (the rest are not counted)
     [GENJUTSU_CLASS]: async (ctx, node, slot) => {
+        const method = (await ctx.input(node, "method")) || "original Genjutsu";
+        if (slot === 9) return method;
+        if (slot === 10) return ctx.input(node, "background");
+        if (slot === 11) return method !== GENJUTSU_ALIGNED && asBool(await ctx.input(node, "native_speedup")) !== false;
         if (slot === 1) {
             const override = await ctx.input(node, "prompt_override");
             if (typeof override === "string" && override.trim()) return override;
             return (await ctx.input(node, "references"))?.prompt ?? "";
         }
-        if (slot > 4) return undefined;
+        if (![0, 2, 3, 4, 5, 8].includes(slot)) return undefined;
         const plan = await genjutsuPlan(ctx, node);
         if (slot === 0) return plan ? plan.pack : ctx.input(node, "references");
         if (!plan) return null;
+        if (slot === 5) return plan.clip.hasAudio ? { kind: "audio", duration: plan.length / H3.FPS } : null;
+        if (slot === 8) return plan.alignedGuide;
         return slot === 2 ? plan.width : slot === 3 ? plan.height : plan.length;
     },
     SECoursesMiniMaxH3ReferenceMode: async (ctx, node, slot) => {
@@ -552,7 +561,7 @@ export function selectMentioned(prompt, entries, cap, kind) {
 
 /** Text prompt / keyframes / init audio guides added by nodes downstream of a conditioning output. */
 async function downstreamConditioningExtras(resolver, id, active) {
-    const extras = { audioGuide: false, keyframeImages: 0, audioKeyframes: 0 };
+    const extras = { audioGuide: false, keyframeImages: 0, keyframeVideoFrames: 0, audioKeyframes: 0 };
     const seen = new Set();
     let frontier = [id];
     while (frontier.length) {
@@ -569,8 +578,12 @@ async function downstreamConditioningExtras(resolver, id, active) {
                     const mode = (await resolver.input(node, "audio_conditioning")) || "lock soundtrack + guide";
                     if (audio && mode !== "lock soundtrack only") extras.audioGuide = true;
                     next.push(consumer);
-                } else if (node.class_type === "MiniMaxH3AddGuide") {
-                    if (await resolver.input(node, "image")) extras.keyframeImages += 1;
+                } else if (node.class_type === "MiniMaxH3AddGuide" || node.class_type === "SECoursesH3GenjutsuApply") {
+                    const apply = node.class_type === "SECoursesH3GenjutsuApply";
+                    const enabled = !apply || (await resolver.input(node, "method")) === GENJUTSU_ALIGNED;
+                    const image = enabled ? await resolver.input(node, apply ? "guide" : "image") : null;
+                    if (image?.kind === "video") extras.keyframeVideoFrames += image.frames || genjutsuUsableFrames(H3.pyRound(image.duration * H3.FPS)) || 0;
+                    else if (image) extras.keyframeImages += 1;
                     if (await resolver.input(node, "audio")) extras.audioKeyframes += 1;
                     next.push(consumer);
                 }
@@ -600,6 +613,7 @@ async function h3CoreImageToVideo(resolver, node, active, id) {
         spec: {
             width: canvas.width, height: canvas.height, frames: canvas.length, prompt: typeof prompt === "string" ? prompt : "",
             keyframeImages: keyframes + extras.keyframeImages, audioGuide: extras.audioGuide || extras.audioKeyframes > 0,
+            keyframeVideoFrames: extras.keyframeVideoFrames,
             pipeline: "core",
         },
         label: keyframes ? "image to video" : "text to video",
@@ -638,6 +652,7 @@ async function h3CoreReferenceToVideo(resolver, node, active, id) {
             width: canvas.width, height: canvas.height, frames: canvas.length, prompt: typeof prompt === "string" ? prompt : "",
             refImages, refVideos, refAudios, refImageSize: (await resolver.input(node, "ref_image_size")) || "match",
             keyframeImages: extras.keyframeImages, audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "core",
+            keyframeVideoFrames: extras.keyframeVideoFrames,
         },
         label: "reference to video",
     };
@@ -670,7 +685,7 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
             refVideos: videos, refAudios: audios,
             refImageSize: (await resolver.input(node, "ref_image_size")) || "match",
             maxSeconds: pack?.maxSeconds ?? 15, audioOnly,
-            keyframeImages: extras.keyframeImages, keyframeVideoFrames: multiFrameContext,
+            keyframeImages: extras.keyframeImages, keyframeVideoFrames: multiFrameContext + extras.keyframeVideoFrames,
             audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "secourses",
         };
         label = audioOnly ? "audio only with references" : "reference to video";
@@ -683,7 +698,7 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
         spec = {
             width: canvas.width, height: canvas.height, frames: canvas.length, prompt,
             keyframeImages: (continuationFrames === 1 ? 1 : 0) + extras.keyframeImages,
-            keyframeVideoFrames: multiFrameContext,
+            keyframeVideoFrames: multiFrameContext + extras.keyframeVideoFrames,
             audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "secourses",
         };
         label = continuationFrames ? "image to video" : "text to video";
@@ -704,6 +719,7 @@ async function h3EmptyLatent(resolver, node, active, id) {
 export const CONDITIONING_ESTIMATORS = {
     MiniMaxH3ImageToVideo: h3CoreImageToVideo,
     MiniMaxH3ReferenceToVideo: h3CoreReferenceToVideo,
+    SECoursesH3ReferenceToVideo: h3CoreReferenceToVideo,
     EmptyMiniMaxH3LatentAV: h3EmptyLatent,
     SECoursesMiniMaxH3References: (r, n, a, id) => h3GalleryAdapter(r, n, a, id, "refs"),
     SECoursesMiniMaxH3TextOnly: (r, n, a, id) => h3GalleryAdapter(r, n, a, id, "text"),

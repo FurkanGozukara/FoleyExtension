@@ -5,11 +5,36 @@ ComfyUI installers into `ComfyUI/StandaloneCustomNodes/FoleyExtension`.
 
 ## MiniMax H3 Genjutsu (character swap)
 
+Updated 27 October 2026: `method` preserves **original Genjutsu**, adds **Genjutsu + task LoRA**,
+and offers **aligned guide + task LoRA**. `SECoursesH3GenjutsuApply` loads Character Swap v1.1
+for a video background, or training adapter V2 followed by Motion Transfer v1.0 for an image
+background (strength 1). These recipes follow [Henge](https://github.com/alisson-anjos/Henge).
+The aligned method uses native Add Guide with the original source frames, excludes that
+video from the native reference channel, and selects dense INT8 attention. It costs more
+tokens; motion/identity quality still depends on the clip. Sparse attention is disabled by
+connecting the Gallery node's `native_speedup` output to the speed optimizer's master switch.
+
+The first eight Gallery outputs retain their old order. New outputs are `aligned_guide`,
+`method`, `background` and `native_speedup`; connect them to Genjutsu Apply and the optimizer
+as shown in the updated presets. Old saved workflows retain the original method by default.
+Task methods add `body_swap:` / `motion_transfer:` and preserve the character's visual style
+in generated prompts. Aligned mode adjusts the removed guide's native video/audio slots;
+later references and standalone audio aliases keep their identities.
+
+Mono/surround H3 reference audio is normalized to stereo at our encoder boundary. Native H3
+packs two channels even when the uploaded waveform has one, which otherwise reproduces
+the reported `[356, 32]` versus `[712, 32]` indexing failure. Stereo samples pass unchanged.
+`SECoursesH3ReferenceToVideo` exposes the safe native-reference schema for SwarmUI, including
+the RefMod path. All three Init Audio modes have a native row-packing regression test.
+
+The original-method behavior is described below.
+
 The **MiniMax H3 Genjutsu** presets replace the person in a video with the
 character of an image. Add the clip to the Reference Gallery (it is `@video1`;
 Load + trim picks the part to use) and one image of the new character
-(`@image1`), leave the prompt empty and Run. The result keeps the clip's motion,
-timing, camera, lip movements, length, aspect ratio and original soundtrack.
+(`@image1`), leave the prompt empty and Run. The clip guides motion, timing and camera;
+the output uses its usable length, aspect ratio and soundtrack. Fast motion and small or
+occluded faces can still drift.
 
 - **MiniMax H3 Genjutsu (Gallery)** (`SECoursesH3Genjutsu`) runs SAM 3.1
   (`sam3.1_multiplex_fp16.safetensors`, Load Checkpoint) on every frame of
