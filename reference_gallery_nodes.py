@@ -2398,7 +2398,11 @@ class SECoursesReferenceGallery:
         "basename to an init image, init audio, or both; other media remains reference material. Media comes only "
         "from the prompt's own directory, with gallery attachments as fallback. Optional toggles merge after the final "
         "job or feed 1, 5, 22, 39, or 56 of each completed video's final frames into the next prompt. A prompt filename ending in "
-        "'_<integer>.txt' overrides that item's output duration in compatible presets."
+        "'_<integer>.txt' overrides that item's output duration in compatible presets. Optional external inputs take "
+        "media from other nodes and come before the gallery files: external_image_sequence (IMAGE, eg an EXR plate "
+        "converted to sRGB; a silent video at video_fps), external_video_with_audio (VIDEO, eg Load Video; resampled, "
+        "with its soundtrack) and external_images (IMAGE; a batch, eg from Batch Images, becomes @image1, @image2... "
+        "up to 9)."
     )
 
     def collect(

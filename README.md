@@ -10,6 +10,9 @@ character of an image. Add the clip to the Reference Gallery (it is `@video1`;
 Load + trim picks the part to use) and one image of the new character
 (`@image1`), leave the prompt empty and Run. The result keeps the clip's motion,
 timing, camera, lip movements, length, aspect ratio and original soundtrack.
+The clip can also come from the gallery's `external_image_sequence` (eg an EXR
+plate, silent) or `external_video_with_audio` input, and the character from
+`external_images` (see *External inputs* below).
 
 - **MiniMax H3 Genjutsu (Gallery)** (`SECoursesH3Genjutsu`) runs SAM 3.1
   (`sam3.1_multiplex_fp16.safetensors`, Load Checkpoint) on every frame of
@@ -180,6 +183,28 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     cards show a `✂ 2–9.5s` badge. Entries without trim fields behave
     exactly as before, so existing workflows, presets, and the SwarmUI
     extension are unaffected.
+  - **External inputs** — three optional input sockets take media from any
+    other ComfyUI node instead of the gallery uploader, eg an EXR plate from
+    an image-sequence loader. Connected media comes first: it is `@video1`,
+    `@image1`, … and the gallery cards are numbered after it (a gallery video
+    becomes `@video2`). They work with the prompt chain, Folder batch and
+    MiniMax H3 Genjutsu.
+    - `external_image_sequence` (IMAGE) — an image sequence (EXR, DPX, PNG, …)
+      used as a silent reference video, one image per frame at `video_fps`
+      (24 for MiniMax H3; frames are not resampled, so convert other frame
+      rates first) and capped at `max_seconds`. Values are clipped to 0–1:
+      convert scene-linear EXR to sRGB (eg with an OCIO node) before the
+      gallery. It becomes `@video1`.
+    - `external_video_with_audio` (VIDEO, eg Load Video) — a video with its
+      soundtrack, streamed from its source, resampled to `video_fps` and
+      trimmed to `max_seconds` like a gallery video. It becomes the next
+      video: `@video1`, or `@video2` when `external_image_sequence` is also
+      connected.
+    - `external_images` (IMAGE) — reference images. A single image is
+      `@image1`; an image batch (eg from **Batch Images**) is split into one
+      reference per image, `@image1`, `@image2`, …, at most 9. Batch nodes
+      resize every image to the first image's size, so batch images of a
+      similar aspect ratio.
 - **MiniMax H3 References (Gallery)** — adapts the gallery pack to MiniMax H3.
   It translates `@` tokens into the `<Picture i>` / `<Video k>` / `<Audio j>`
   labels the model expects (audio labels are offset past video soundtracks
