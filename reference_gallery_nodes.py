@@ -1446,10 +1446,10 @@ def _resolve_reference_entry(entry):
 
 
 # --- External (in-memory) references --------------------------------------------------------------------
-# The gallery's optional IMAGE inputs (eg an EXR / PNG sequence from any loader node) become pack entries
-# with ``source == "external"``. They carry tensors instead of a file: ``external_frames`` (uint8
-# [T, H, W, 3], already capped to VIDEO_DECODE_AREA_CAP like a decoded file) plus an optional ``audio``
-# for a video, and ``pixels`` (float [1, H, W, 3]) for an image.
+# The gallery's optional inputs (an EXR / PNG / DPX image sequence, a VIDEO with its soundtrack, or IMAGE
+# references from any loader node) become pack entries with ``source == "external"``. They carry tensors instead
+# of a file: ``external_frames`` (uint8 [T, H, W, 3], already capped to VIDEO_DECODE_AREA_CAP like a decoded
+# file) plus an optional ``audio`` for a video, and ``pixels`` (float [1, H, W, 3]) for an image.
 EXTERNAL_SOURCE = "external"
 EXTERNAL_MAX_IMAGES = 9
 EXTERNAL_CHUNK = 16
@@ -1498,18 +1498,19 @@ def _cut_audio(audio, seconds):
     return {**audio, "waveform": audio["waveform"][..., :samples]}
 
 
-def _external_video_entry(images, audio, fps, max_seconds):
-    """@video entry from an IMAGE sequence at ``fps`` (HDR values are clipped to 0-1, NaN/inf zeroed)."""
+def _external_sequence_entry(images, fps, max_seconds):
+    """@video entry from an IMAGE sequence, one image per frame at ``fps`` (HDR values are clipped to 0-1,
+    NaN/inf zeroed; convert scene-linear EXR to sRGB before the gallery)."""
     import torch
 
     limit = max(1, round(float(max_seconds) * float(fps)))
     if isinstance(images, torch.Tensor) and images.ndim == 4:
         images = images[:limit]  # before the CPU copy, so a long sequence is not copied whole
-    images = _external_rgb(images, "external_video")[:limit]
+    images = _external_rgb(images, "external_image_sequence")[:limit]
     count, height, width = int(images.shape[0]), int(images.shape[1]), int(images.shape[2])
     if count < 5:
         raise ValueError(
-            f"The gallery's external_video input has {count} frame(s); MiniMax H3 needs at least 5 "
+            f"The gallery's external_image_sequence input has {count} frame(s); MiniMax H3 needs at least 5 "
             f"(~0.2s at 24 fps). Connect an image sequence, not a single image (use external_images for that)."
         )
     target_width, target_height = _fit_dimensions(width, height, VIDEO_DECODE_AREA_CAP)
@@ -1518,15 +1519,54 @@ def _external_video_entry(images, audio, fps, max_seconds):
         chunk = torch.nan_to_num(images[start:start + EXTERNAL_CHUNK].to(torch.float32), nan=0.0, posinf=1.0, neginf=0.0)
         chunk = _resize_image_tensor(chunk, target_width, target_height)
         frames[start:start + chunk.shape[0]] = chunk.mul_(255.0).round_().to(torch.uint8)
-    if audio is not None:
-        if not isinstance(audio, dict) or "waveform" not in audio or "sample_rate" not in audio:
-            raise ValueError("The gallery's external_video_audio input must be a ComfyUI AUDIO.")
-        audio = _cut_audio(audio, count / float(fps))
     print(
-        f"[SECoursesReferenceGallery] external video: {count} frame(s) at {float(fps):g} fps "
+        f"[SECoursesReferenceGallery] external image sequence: {count} frame(s) at {float(fps):g} fps "
         f"({count / float(fps):.2f}s), {width}x{height}"
         + (f" -> {target_width}x{target_height}" if (target_width, target_height) != (width, height) else "")
-        + (", with soundtrack" if audio is not None else ", silent"),
+        + ", silent",
+        flush=True,
+    )
+    return {
+        "file": "",
+        "name": "external image sequence",
+        "source": EXTERNAL_SOURCE,
+        "external_frames": frames,
+        "audio": None,
+    }
+
+
+def _external_video_entry(video, fps, max_seconds):
+    """@video entry from a ComfyUI VIDEO (eg Load Video): its frames resampled to ``fps`` and its soundtrack.
+
+    The video is streamed from its source like a gallery file (resampled, area-capped, at most max_seconds),
+    so the whole clip is never decoded into float RAM."""
+    import os
+
+    if not hasattr(video, "get_stream_source"):
+        raise ValueError("The gallery's external_video_with_audio input must be a VIDEO (eg from Load Video).")
+    source = video.get_stream_source()
+    if isinstance(source, os.PathLike):
+        source = os.fspath(source)
+
+    def rewind():
+        if hasattr(source, "seek"):
+            source.seek(0)
+        return source
+
+    fps = float(fps)
+    frames = _decode_video_frames(rewind(), fps, max_frames=max(1, round(float(max_seconds) * fps)),
+                                  area_cap=VIDEO_DECODE_AREA_CAP)
+    count = int(frames.shape[0])
+    if count < 5:
+        raise ValueError(
+            f"The gallery's external_video_with_audio input has {count} frame(s) at {fps:g} fps; MiniMax H3 needs "
+            "at least 5 (~0.2s at 24 fps)."
+        )
+    audio = _decode_video_audio(rewind(), count / fps)
+    print(
+        f"[SECoursesReferenceGallery] external video: {count} frame(s) at {fps:g} fps ({count / fps:.2f}s), "
+        f"{int(frames.shape[2])}x{int(frames.shape[1])}"
+        + (", with soundtrack" if audio is not None else ", no soundtrack in the video"),
         flush=True,
     )
     return {
@@ -1551,6 +1591,8 @@ def _external_image_entries(images):
     images = _external_rgb(images, "external_images")
     if int(images.shape[0]) > EXTERNAL_MAX_IMAGES:
         images = images[:EXTERNAL_MAX_IMAGES]
+    print(f"[SECoursesReferenceGallery] external images: {int(images.shape[0])} reference image(s) "
+          f"{int(images.shape[2])}x{int(images.shape[1])}", flush=True)
     entries = []
     for index in range(int(images.shape[0])):
         pixels = torch.nan_to_num(images[index:index + 1].to(torch.float32), nan=0.0, posinf=1.0, neginf=0.0)
@@ -2309,18 +2351,21 @@ class SECoursesReferenceGallery:
                 "batch_run_id": ("STRING", {"default": ""}),
                 "batch_item_index": ("INT", {"default": -1, "min": -1, "max": BATCH_MAX_PROMPTS - 1}),
                 "batch_item_count": ("INT", {"default": 0, "min": 0, "max": BATCH_MAX_PROMPTS}),
-                "external_video": ("IMAGE", {
-                    "tooltip": "Optional image sequence from any loader node (eg an EXR / PNG / DPX sequence), used as a "
-                               "reference video at video_fps. It becomes @video1; gallery videos move to @video2, @video3. "
-                               "HDR values are clipped to 0-1, so convert linear EXR to sRGB first (eg 'Linear to sRGB').",
+                "external_image_sequence": ("IMAGE", {
+                    "tooltip": "Optional image sequence (EXR, DPX, PNG...) from any loader node, used as a silent reference "
+                               "video, one image per frame at video_fps. It becomes @video1; gallery videos move after it. "
+                               "Values are clipped to 0-1, so convert scene-linear EXR to sRGB before the gallery.",
                 }),
-                "external_video_audio": ("AUDIO", {
-                    "tooltip": "Optional soundtrack of external_video (an image sequence has none). Without it the clip is "
-                               "treated as silent.",
+                "external_video_with_audio": ("VIDEO", {
+                    "tooltip": "Optional video with its soundtrack (eg from Load Video), resampled to video_fps. It becomes "
+                               "the next @video after external_image_sequence (@video1 when that is not connected); gallery "
+                               "videos move after it.",
                 }),
                 "external_images": ("IMAGE", {
-                    "tooltip": "Optional image(s) from any loader node, each frame one reference image (max 9). They become "
-                               "@image1, @image2...; gallery images move after them.",
+                    "tooltip": "Optional reference image(s) from any loader node. A batch (eg from Batch Images) is split "
+                               "into one reference per image, max 9. They become @image1, @image2...; gallery images move "
+                               "after them. Batch nodes resize every image to the first one's size, so batch images of "
+                               "similar aspect ratio.",
                 }),
             },
         }
@@ -2370,25 +2415,24 @@ class SECoursesReferenceGallery:
         batch_item_count=0,
         match_batch_init_media=False,
         continuation_context_frames="1",
-        external_video=None,
-        external_video_audio=None,
+        external_image_sequence=None,
+        external_video_with_audio=None,
         external_images=None,
     ):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
         context_frames = _continuation_context_frame_count(continuation_context_frames)
-        if external_video_audio is not None and external_video is None:
-            raise ValueError("external_video_audio is connected but external_video is not; connect the image sequence too.")
-        external_video_entry = (
-            _external_video_entry(external_video, external_video_audio, video_fps, max_seconds)
-            if external_video is not None else None
-        )
+        external_video_entries = []
+        if external_image_sequence is not None:
+            external_video_entries.append(_external_sequence_entry(external_image_sequence, video_fps, max_seconds))
+        if external_video_with_audio is not None:
+            external_video_entries.append(_external_video_entry(external_video_with_audio, video_fps, max_seconds))
         external_image_entries = _external_image_entries(external_images) if external_images is not None else []
-        if external_video_entry is not None or external_image_entries:
-            # External inputs come first: they are @image1.. / @video1 and the gallery files follow.
+        if external_video_entries or external_image_entries:
+            # External inputs come first: they are @image1.. / @video1.. and the gallery files follow.
             manifest = dict(manifest)
             manifest["images"] = [*external_image_entries, *manifest["images"]]
-            manifest["videos"] = ([external_video_entry] if external_video_entry is not None else []) + manifest["videos"]
+            manifest["videos"] = [*external_video_entries, *manifest["videos"]]
         folder_batch = _collect_folder_batch(
             batch_folder, manifest, video_fps, max_seconds, bool(match_batch_init_media)
         )
@@ -2403,9 +2447,7 @@ class SECoursesReferenceGallery:
             for pack in packs:
                 if pack.get("batch", {}).get("uses_folder_media"):
                     pack["images"] = [*external_image_entries, *pack["images"]]
-                    pack["videos"] = (
-                        [external_video_entry] if external_video_entry is not None else []
-                    ) + pack["videos"]
+                    pack["videos"] = [*external_video_entries, *pack["videos"]]
         elif chained_prompts:
             prompts = [prompt, *chained_prompts]
             if not str(prompt).strip():
@@ -3708,57 +3750,8 @@ class SECoursesTrimAudio:
         return (trimmed,)
 
 
-class SECoursesLinearToSRGB:
-    """Scene-linear IMAGE (eg from an EXR loader) to display sRGB 0-1 for the gallery's external inputs."""
-
-    @classmethod
-    def INPUT_TYPES(cls):
-        return {
-            "required": {
-                "images": ("IMAGE",),
-                "exposure": ("FLOAT", {
-                    "default": 0.0, "min": -16.0, "max": 16.0, "step": 0.1,
-                    "tooltip": "Exposure in stops applied in linear light before the sRGB transfer curve.",
-                }),
-                "highlights": (["clip", "soft rolloff"], {
-                    "default": "clip",
-                    "tooltip": "'clip' hard-clips values above 1.0; 'soft rolloff' compresses linear values above 0.8 "
-                               "smoothly toward 1.0 so bright highlights keep some detail.",
-                }),
-            }
-        }
-
-    CATEGORY = "SECourses/references"
-    RETURN_TYPES = ("IMAGE",)
-    RETURN_NAMES = ("images",)
-    FUNCTION = "convert"
-    DESCRIPTION = (
-        "Converts scene-linear (Rec.709 primaries) images such as an EXR sequence to sRGB-encoded 0-1 images, "
-        "which SAM 3.1, the vision describer and MiniMax H3 expect. Not an ACES / OCIO transform: convert "
-        "ACEScg or other gamuts to linear Rec.709 / sRGB primaries first."
-    )
-
-    def convert(self, images, exposure=0.0, highlights="clip"):
-        import torch
-
-        out = torch.empty_like(images[..., :3], dtype=torch.float32)
-        gain = 2.0 ** float(exposure)
-        knee = 0.8
-        for start in range(0, int(images.shape[0]), EXTERNAL_CHUNK):
-            x = torch.nan_to_num(images[start:start + EXTERNAL_CHUNK, ..., :3].to(torch.float32), nan=0.0, posinf=1e4, neginf=0.0)
-            x = x.mul(gain).clamp_(min=0.0)
-            if highlights == "soft rolloff":
-                over = (x - knee).clamp_(min=0.0)
-                x = torch.where(x > knee, knee + (1.0 - knee) * (1.0 - torch.exp(-over / (1.0 - knee))), x)
-            x = x.clamp_(0.0, 1.0)
-            x = torch.where(x <= 0.0031308, x * 12.92, 1.055 * x.pow(1.0 / 2.4) - 0.055)
-            out[start:start + x.shape[0]] = x.clamp_(0.0, 1.0)
-        return (out,)
-
-
 NODE_CLASS_MAPPINGS = {
     "SECoursesReferenceGallery": SECoursesReferenceGallery,
-    "SECoursesLinearToSRGB": SECoursesLinearToSRGB,
     "SECoursesBatchDuration": SECoursesBatchDuration,
     "SECoursesBatchContinuationFrame": SECoursesBatchContinuationFrame,
     "SECoursesBatchVideoSaveMerge": SECoursesBatchVideoSaveMerge,
@@ -3775,7 +3768,6 @@ NODE_CLASS_MAPPINGS = {
 
 NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesReferenceGallery": "SECourses Reference Gallery (Images / Videos / Audio)",
-    "SECoursesLinearToSRGB": "Linear to sRGB (EXR for Reference Gallery)",
     "SECoursesBatchDuration": "MiniMax H3 Folder Batch Duration",
     "SECoursesBatchContinuationFrame": "MiniMax H3 Folder Batch Previous Last Frame",
     "SECoursesBatchVideoSaveMerge": "Save + Merge MiniMax H3 Folder Batch Videos",

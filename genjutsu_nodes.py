@@ -649,7 +649,7 @@ class SECoursesH3Genjutsu:
             raise ValueError(f"MiniMax H3 Genjutsu needs the gallery's video_fps at {FPS}; it is {fps:g}.")
         trim_start, seconds = _entry_trim_window(entry, float(references.get("max_seconds", 15.0)))
         if external:
-            # An image sequence from the gallery's external_video input (already uint8, area-capped).
+            # An external @video1 from the gallery (image sequence or VIDEO input): already uint8 and area-capped.
             frames = entry["external_frames"][:max(1, round(seconds * fps))]
         else:
             frames = _decode_video_frames(path, fps, max_frames=max(1, round(seconds * fps)),
