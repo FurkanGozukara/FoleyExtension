@@ -1,3 +1,12 @@
+## Genjutsu task adapters and aligned guides
+
+The Character Swap v1.1 / Motion Transfer v1.0 recipes and aligned-guide routing follow
+[Henge](https://github.com/alisson-anjos/Henge), reviewed at `df72d72`, by Alisson Anjos.
+Our implementation calls native ComfyUI loaders and Add Guide; it does not install Henge
+or ComfyUI-BFSNodes. Task model weights are downloaded unchanged and retain their separate
+[asset licenses](https://huggingface.co/Alissonerdx/Minimax-H3-ComfyUI). Training adapter V2
+is by [ostris](https://huggingface.co/ostris/minimax_h3_training_adapter).
+
 ## FuzzPuppy LTX 2.3 Foley Workflow
 
 `fuzzpuppy_nodes.py` is derived from the `ltx_foley_v2a/nodes.py` helper in:

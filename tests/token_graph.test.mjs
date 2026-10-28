@@ -400,6 +400,33 @@ test("Genjutsu preset: clip length and aspect, the guide as @video1, the templat
     delete MEDIA["reference_gallery/boxer.mp4 [input]"];
 });
 
+test("aligned Genjutsu counts the full source guide and soundtrack, not a native video reference", async () => {
+    MEDIA["kungfu.mp4"] = { kind: "video", width: 720, height: 1280, duration: 8.124, has_audio: true };
+    MEDIA["caricature.jpg"] = { kind: "image", width: 1088, height: 1920 };
+    const output = {
+        "400": gallery({ references: JSON.stringify({images: [{file: "caricature.jpg"}], videos: [{file: "kungfu.mp4"}]}), prompt: "" }),
+        "504": {class_type: "SECoursesH3Genjutsu", inputs: {references: ["400", 0], width: 1344, height: 768, match_source_aspect: true,
+            guide_megapixels: .15, background: "video (character replacement)", method: "aligned guide + task LoRA"}},
+        "136": {class_type: "SECoursesMiniMaxH3Auto", inputs: {references: ["504", 0], prompt_override: ["504", 1],
+            width: ["504", 2], height: ["504", 3], length: ["504", 4], ref_image_size: "match"}},
+        "424": {class_type: "SECoursesMiniMaxH3InitAudio", inputs: {positive: ["136", 0], latent: ["136", 1], init_audio: ["504", 5], audio_conditioning: "lock soundtrack + guide"}},
+        "508": {class_type: "SECoursesH3GenjutsuApply", inputs: {model: ["1", 0], positive: ["424", 0], latent: ["424", 1],
+            method: ["504", 9], background: ["504", 10], guide: ["504", 8]}},
+        "50": {class_type: "BasicGuider", inputs: {model: ["508", 0], conditioning: ["508", 1]}},
+        "51": {class_type: "SamplerCustomAdvanced", inputs: {guider: ["50", 0], latent_image: ["424", 1]}},
+        "52": {class_type: "VAEDecode", inputs: {samples: ["51", 0]}},
+        "53": {class_type: "SaveVideo", inputs: {images: ["52", 0], fps: 24}},
+    };
+    const result = await estimateFromPrompt(output, 400);
+    assert.ok(result.estimate, result.reason);
+    assert.deepEqual([result.estimate.width, result.estimate.height, result.estimate.frames], [768, 1344, 192]);
+    assert.equal(result.estimate.parts.refVideos, 0);
+    // Native packed layout: 57 video latents * 42 * 24 patches, plus 320 stereo audio latents.
+    assert.equal(result.estimate.parts.keyframes, 57456 + 640);
+    const resolver = new PromptResolver(output);
+    assert.equal(await resolver.resolve("504", 11), false);
+});
+
 test("no active conditioning node -> unavailable with a reason", async () => {
     const result = await estimateFromPrompt({ "400": gallery() }, 400);
     assert.equal(result.estimate, null);

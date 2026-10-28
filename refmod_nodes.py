@@ -26,6 +26,7 @@ from comfy_api.latest import io
 from comfy_extras.nodes_minimax_h3 import (
     MiniMaxH3ImageToVideo, MiniMaxH3ReferenceToVideo, _encode_ref_audio, _resize,
 )
+from .reference_gallery_nodes import _H3StereoAudioVAE
 
 
 REF_PACK = "SECOURSES_REF_PACK"
@@ -316,7 +317,22 @@ def encode_with_refmods(native, selection, **kwargs):
     return io.NodeOutput(proxy.append(result.args[0]), result.args[1])
 
 
-class SECoursesH3RefModReferences(MiniMaxH3ReferenceToVideo):
+class SECoursesH3ReferenceToVideo(MiniMaxH3ReferenceToVideo):
+    @classmethod
+    def define_schema(cls):
+        schema = MiniMaxH3ReferenceToVideo.define_schema()
+        schema.node_id = "SECoursesH3ReferenceToVideo"
+        schema.display_name = "MiniMax H3 References (Mono / Stereo Audio)"
+        return schema
+
+    @classmethod
+    def execute(cls, **kwargs):
+        if kwargs.get("audio_vae") is not None:
+            kwargs["audio_vae"] = _H3StereoAudioVAE(kwargs["audio_vae"])
+        return MiniMaxH3ReferenceToVideo.execute(**kwargs)
+
+
+class SECoursesH3RefModReferences(SECoursesH3ReferenceToVideo):
     @classmethod
     def define_schema(cls):
         schema = MiniMaxH3ReferenceToVideo.define_schema()
@@ -331,7 +347,7 @@ class SECoursesH3RefModReferences(MiniMaxH3ReferenceToVideo):
 
     @classmethod
     def execute(cls, refmods="[]", **kwargs):
-        return encode_with_refmods(MiniMaxH3ReferenceToVideo, refmods, **kwargs)
+        return encode_with_refmods(SECoursesH3ReferenceToVideo, refmods, **kwargs)
 
 
 class SECoursesH3RefModImageToVideo(MiniMaxH3ImageToVideo):
@@ -580,6 +596,7 @@ class SECoursesH3RefModBuildGallery:
 
 
 NODE_CLASS_MAPPINGS = {c.__name__: c for c in (
+    SECoursesH3ReferenceToVideo,
     SECoursesH3RefModStack, SECoursesH3RefModReferences, SECoursesH3RefModImageToVideo,
     SECoursesH3RefModBuild, SECoursesH3RefModBuildGallery, SECoursesH3RefModTextEncode,
     SECoursesH3RefModSwarmTextEncode,
