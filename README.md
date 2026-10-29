@@ -231,7 +231,11 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
   mode output is diagnostic; **MiniMax H3 Reference Mode** selects the
   checkpoint before model-dependent VAE optimization. Auto applies a
   continuation frame as an FL2VA first-frame keyframe when no other references
-  exist, or as an explicit Ref2VA picture reference when they do.
+  exist, or as an explicit Ref2VA picture reference when they do. Its optional
+  `last_frame` image is FL2VA's end keyframe (text or first frame, no gallery
+  references; used by the Pika H3 Flex First Last Frame preset). When the prompt
+  does not start with an alignment line, the official one is added with the real
+  duration, eg `... <Picture 2> (from [Shot 1]) aligns with the 5.17-second mark`.
 - **MiniMax H3 Batch Duration** resolves the per-item filename suffix while
   preserving the user-set duration for normal prompts and unmatched names.
 - **MiniMax H3 Previous Batch Final Frame** validates strict sequential order

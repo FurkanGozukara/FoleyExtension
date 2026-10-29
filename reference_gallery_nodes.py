@@ -3258,6 +3258,25 @@ class SECoursesMiniMaxH3ReferenceMode:
         )
 
 
+def _has_keyframe_alignment(prompt):
+    head = str(prompt).lstrip()[:200].lower()
+    return head.startswith("how the reference pictures align") or head.startswith("for the target video, at")
+
+
+def _keyframe_alignment_line(has_first_frame, length):
+    """The FL2VA alignment line of the MiniMax H3 / Pika H3 Flex prompt format for a last frame."""
+    end = f"{int(length) / 24.0:.2f}"
+    if has_first_frame:
+        return (
+            "How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the "
+            f"0.00-second mark of the target video; <Picture 2> (from [Shot 1]) aligns with the {end}-second mark of the target video."
+        )
+    return (
+        "How the reference pictures align with the target video — <Picture 1> (from [Shot 1]) aligns with the "
+        f"{end}-second mark of the target video."
+    )
+
+
 class SECoursesMiniMaxH3TextOnly:
     @classmethod
     def INPUT_TYPES(cls):
@@ -3286,6 +3305,9 @@ class SECoursesMiniMaxH3TextOnly:
                 "first_frame": ("IMAGE", {
                     "tooltip": "Optional final frame from the preceding folder-batch video, used as FL2VA's first-frame keyframe.",
                 }),
+                "last_frame": ("IMAGE", {
+                    "tooltip": "Optional FL2VA last-frame keyframe: the video ends on this image (cover-cropped to the output size). Without an alignment line at the start of the prompt, the official one is added with the actual duration.",
+                }),
             },
         }
 
@@ -3293,9 +3315,9 @@ class SECoursesMiniMaxH3TextOnly:
     RETURN_TYPES = ("CONDITIONING", "LATENT")
     RETURN_NAMES = ("positive", "latent")
     FUNCTION = "encode"
-    DESCRIPTION = "Uses MiniMax H3's FL2VA checkpoint for text-only or first-frame generation."
+    DESCRIPTION = "Uses MiniMax H3's FL2VA checkpoint for text-only, first-frame, last-frame or first + last frame generation."
 
-    def encode(self, clip, vae, references, width, height, length, prompt_override=None, first_frame=None):
+    def encode(self, clip, vae, references, width, height, length, prompt_override=None, first_frame=None, last_frame=None):
         try:
             from comfy_extras.nodes_minimax_h3 import MiniMaxH3ImageToVideo
         except ImportError:
@@ -3308,6 +3330,8 @@ class SECoursesMiniMaxH3TextOnly:
         if prompt_override is not None and str(prompt_override).strip():
             prompt = str(prompt_override)
         prompt = translate_reference_tokens(prompt, 0, 0, 0, 0)
+        if last_frame is not None and not _has_keyframe_alignment(prompt):
+            prompt = _keyframe_alignment_line(first_frame is not None, length) + "\n\n" + prompt
         output = MiniMaxH3ImageToVideo.execute(
             clip=clip,
             vae=vae,
@@ -3316,6 +3340,7 @@ class SECoursesMiniMaxH3TextOnly:
             height=height,
             length=length,
             first_frame=first_frame,
+            last_frame=last_frame,
         )
         return (output.args[0], output.args[1])
 
@@ -3328,6 +3353,9 @@ class SECoursesMiniMaxH3Auto:
         optional.pop("audio_only_mode", None)
         optional["continuation_frame"] = (OPTIONAL_IMAGE_TYPE, {
             "tooltip": "Optional value from MiniMax H3 Previous Batch Video Frames.",
+        })
+        optional["last_frame"] = ("IMAGE", {
+            "tooltip": "Optional last frame: the video ends on this image. FL2VA only (text or first frame, no references).",
         })
         return {**inputs, "optional": optional}
 
@@ -3353,6 +3381,7 @@ class SECoursesMiniMaxH3Auto:
         ref_image_size,
         prompt_override=None,
         continuation_frame=None,
+        last_frame=None,
     ):
         if not isinstance(references, dict):
             raise ValueError("The references input must come from a SECourses Reference Gallery node.")
@@ -3381,6 +3410,13 @@ class SECoursesMiniMaxH3Auto:
             )
         has_references = any(references.get(kind) for kind in ("images", "videos", "audios", "refmods"))
         native_video_context = continuation_frame is not None and continuation_context_frames > 1
+        if last_frame is not None and has_references:
+            raise ValueError(
+                "The last frame works with text or a first frame (FL2VA), not with image, video or audio references. "
+                "Remove the references from the gallery or clear LAST FRAME."
+            )
+        if last_frame is not None and native_video_context:
+            raise ValueError("The last frame cannot be combined with a multi-frame continuation context.")
         if native_video_context and int(length) <= continuation_context_frames:
             raise ValueError(
                 f"The generated video must be longer than its {continuation_context_frames}-frame "
@@ -3409,6 +3445,7 @@ class SECoursesMiniMaxH3Auto:
                 length=length,
                 prompt_override=prompt_override,
                 first_frame=None if native_video_context else continuation_frame,
+                last_frame=last_frame,
             )
         if native_video_context:
             try:
