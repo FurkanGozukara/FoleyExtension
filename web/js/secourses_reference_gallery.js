@@ -1511,7 +1511,9 @@ class ReferenceGalleryUI {
             if (w === this.widget || w.hidden) continue;
             fixed += (w.computeSize ? w.computeSize(this.node.size[0])[1] : LiteGraph.NODE_WIDGET_HEIGHT) + 4;
         }
-        fixed += Math.max(this.node.inputs?.length ?? 0, this.node.outputs?.length ?? 0) * LiteGraph.NODE_SLOT_HEIGHT;
+        // Widget inputs (sockets of prompt, video_fps, ...) sit on their widget rows, not on slot rows.
+        const slotInputs = (this.node.inputs ?? []).filter((input) => !input.widget).length;
+        fixed += Math.max(slotInputs, this.node.outputs?.length ?? 0) * LiteGraph.NODE_SLOT_HEIGHT;
         return fixed;
     }
 

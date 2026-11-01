@@ -1445,6 +1445,185 @@ def _resolve_reference_entry(entry):
     return str(path)
 
 
+# --- External (in-memory) references --------------------------------------------------------------------
+# The gallery's optional inputs (an EXR / PNG / DPX image sequence, a VIDEO with its soundtrack, or IMAGE
+# references from any loader node) become pack entries with ``source == "external"``. They carry tensors instead
+# of a file: ``external_frames`` (uint8 [T, H, W, 3], already capped to VIDEO_DECODE_AREA_CAP like a decoded
+# file) plus an optional ``audio`` for a video, and ``pixels`` (float [1, H, W, 3]) for an image.
+EXTERNAL_SOURCE = "external"
+EXTERNAL_MAX_IMAGES = 9
+EXTERNAL_CHUNK = 16
+
+
+def _is_external_entry(entry):
+    return isinstance(entry, dict) and entry.get("source") == EXTERNAL_SOURCE
+
+
+def _resize_image_tensor(images, width, height):
+    """[N, H, W, 3] float -> [N, height, width, 3] float clamped to 0-1 (area down, bicubic up)."""
+    import torch
+
+    width, height = int(width), int(height)
+    if int(images.shape[1]) != height or int(images.shape[2]) != width:
+        upscale = width * height > int(images.shape[1]) * int(images.shape[2])
+        x = images.movedim(-1, 1)
+        if upscale:
+            x = torch.nn.functional.interpolate(x, size=(height, width), mode="bicubic", align_corners=False)
+        else:
+            x = torch.nn.functional.interpolate(x, size=(height, width), mode="area")
+        images = x.movedim(1, -1)
+    return images.clamp(0.0, 1.0)
+
+
+def _external_rgb(images, label):
+    """A ComfyUI IMAGE as CPU RGB [N, H, W, 3] (alpha dropped, grey expanded); values are not yet clamped."""
+    import torch
+
+    if not isinstance(images, torch.Tensor):
+        raise ValueError(f"The gallery's {label} input must be an IMAGE.")
+    if images.ndim == 3:
+        images = images[None]
+    if images.ndim != 4 or int(images.shape[-1]) not in (1, 3, 4) or int(images.shape[0]) < 1:
+        raise ValueError(f"The gallery's {label} input has an unexpected shape {tuple(images.shape)}.")
+    images = images.detach().to("cpu")
+    if int(images.shape[-1]) == 1:
+        images = images.expand(-1, -1, -1, 3)
+    return images[..., :3]
+
+
+def _cut_audio(audio, seconds):
+    if audio is None:
+        return None
+    samples = max(1, round(float(seconds) * int(audio["sample_rate"])))
+    return {**audio, "waveform": audio["waveform"][..., :samples]}
+
+
+def _external_sequence_entry(images, fps, max_seconds):
+    """@video entry from an IMAGE sequence, one image per frame at ``fps`` (HDR values are clipped to 0-1,
+    NaN/inf zeroed; convert scene-linear EXR to sRGB before the gallery)."""
+    import torch
+
+    limit = max(1, round(float(max_seconds) * float(fps)))
+    if isinstance(images, torch.Tensor) and images.ndim == 4:
+        images = images[:limit]  # before the CPU copy, so a long sequence is not copied whole
+    images = _external_rgb(images, "external_image_sequence")[:limit]
+    count, height, width = int(images.shape[0]), int(images.shape[1]), int(images.shape[2])
+    if count < 5:
+        raise ValueError(
+            f"The gallery's external_image_sequence input has {count} frame(s); MiniMax H3 needs at least 5 "
+            f"(~0.2s at 24 fps). Connect an image sequence, not a single image (use external_images for that)."
+        )
+    target_width, target_height = _fit_dimensions(width, height, VIDEO_DECODE_AREA_CAP)
+    frames = torch.empty((count, target_height, target_width, 3), dtype=torch.uint8)
+    for start in range(0, count, EXTERNAL_CHUNK):
+        chunk = torch.nan_to_num(images[start:start + EXTERNAL_CHUNK].to(torch.float32), nan=0.0, posinf=1.0, neginf=0.0)
+        chunk = _resize_image_tensor(chunk, target_width, target_height)
+        frames[start:start + chunk.shape[0]] = chunk.mul_(255.0).round_().to(torch.uint8)
+    print(
+        f"[SECoursesReferenceGallery] external image sequence: {count} frame(s) at {float(fps):g} fps "
+        f"({count / float(fps):.2f}s), {width}x{height}"
+        + (f" -> {target_width}x{target_height}" if (target_width, target_height) != (width, height) else "")
+        + ", silent",
+        flush=True,
+    )
+    return {
+        "file": "",
+        "name": "external image sequence",
+        "source": EXTERNAL_SOURCE,
+        "external_frames": frames,
+        "audio": None,
+    }
+
+
+def _external_video_entry(video, fps, max_seconds):
+    """@video entry from a ComfyUI VIDEO (eg Load Video): its frames resampled to ``fps`` and its soundtrack.
+
+    The video is streamed from its source like a gallery file (resampled, area-capped, at most max_seconds),
+    so the whole clip is never decoded into float RAM."""
+    import os
+
+    if not hasattr(video, "get_stream_source"):
+        raise ValueError("The gallery's external_video_with_audio input must be a VIDEO (eg from Load Video).")
+    source = video.get_stream_source()
+    if isinstance(source, os.PathLike):
+        source = os.fspath(source)
+
+    def rewind():
+        if hasattr(source, "seek"):
+            source.seek(0)
+        return source
+
+    fps = float(fps)
+    frames = _decode_video_frames(rewind(), fps, max_frames=max(1, round(float(max_seconds) * fps)),
+                                  area_cap=VIDEO_DECODE_AREA_CAP)
+    count = int(frames.shape[0])
+    if count < 5:
+        raise ValueError(
+            f"The gallery's external_video_with_audio input has {count} frame(s) at {fps:g} fps; MiniMax H3 needs "
+            "at least 5 (~0.2s at 24 fps)."
+        )
+    audio = _decode_video_audio(rewind(), count / fps)
+    print(
+        f"[SECoursesReferenceGallery] external video: {count} frame(s) at {fps:g} fps ({count / fps:.2f}s), "
+        f"{int(frames.shape[2])}x{int(frames.shape[1])}"
+        + (", with soundtrack" if audio is not None else ", no soundtrack in the video"),
+        flush=True,
+    )
+    return {
+        "file": "",
+        "name": "external video",
+        "source": EXTERNAL_SOURCE,
+        "external_frames": frames,
+        "audio": audio,
+    }
+
+
+def _external_image_entries(images):
+    """One @image entry per frame of an IMAGE batch (at most EXTERNAL_MAX_IMAGES)."""
+    import torch
+
+    if isinstance(images, torch.Tensor) and images.ndim == 4 and int(images.shape[0]) > EXTERNAL_MAX_IMAGES:
+        print(
+            f"[SECoursesReferenceGallery] external_images has {int(images.shape[0])} images; "
+            f"using the first {EXTERNAL_MAX_IMAGES} (the MiniMax H3 image limit).",
+            flush=True,
+        )
+    images = _external_rgb(images, "external_images")
+    if int(images.shape[0]) > EXTERNAL_MAX_IMAGES:
+        images = images[:EXTERNAL_MAX_IMAGES]
+    print(f"[SECoursesReferenceGallery] external images: {int(images.shape[0])} reference image(s) "
+          f"{int(images.shape[2])}x{int(images.shape[1])}", flush=True)
+    entries = []
+    for index in range(int(images.shape[0])):
+        pixels = torch.nan_to_num(images[index:index + 1].to(torch.float32), nan=0.0, posinf=1.0, neginf=0.0)
+        entries.append({
+            "file": "",
+            "name": f"external image {index + 1}",
+            "source": EXTERNAL_SOURCE,
+            "pixels": pixels.clamp(0.0, 1.0),
+        })
+    return entries
+
+
+def _entry_image_dimensions(entry):
+    """(width, height, orientation) of an image entry, file-backed or external."""
+    if _is_external_entry(entry):
+        pixels = entry["pixels"]
+        return int(pixels.shape[2]), int(pixels.shape[1]), 1
+    return _oriented_image_dimensions(_resolve_reference_entry(entry))
+
+
+def _load_entry_image(entry, target_width=None, target_height=None):
+    """An image entry as float [1, H, W, 3], down-only like _load_reference_image."""
+    if _is_external_entry(entry):
+        pixels = entry["pixels"]
+        width, height = int(pixels.shape[2]), int(pixels.shape[1])
+        target_width = min(width, int(target_width or width))
+        target_height = min(height, int(target_height or height))
+        return _resize_image_tensor(pixels, target_width, target_height)
+    return _load_reference_image(_resolve_reference_entry(entry), target_width, target_height)
+
+
 def _available_media_budget(maximum):
     """Use at most one eighth of currently available RAM for one media class."""
     try:
@@ -1875,8 +2054,9 @@ def _prepare_image_references(entries, width, height, ref_image_size, byte_budge
     specs = []
     requested_sizes = []
     for entry in entries:
-        path = _resolve_reference_entry(entry)
-        source_width, source_height, _orientation = _oriented_image_dimensions(path)
+        external = _is_external_entry(entry)
+        path = None if external else _resolve_reference_entry(entry)
+        source_width, source_height, _orientation = _entry_image_dimensions(entry)
         target_width, target_height = _fit_dimensions(
             source_width,
             source_height,
@@ -1887,6 +2067,7 @@ def _prepare_image_references(entries, width, height, ref_image_size, byte_budge
             "path": path,
             "name": entry.get("name") or "?",
             "source_size": (source_width, source_height),
+            "pixels": entry["pixels"] if external else None,
         })
         requested_sizes.append((target_width, target_height))
 
@@ -1906,8 +2087,15 @@ def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=Non
 
     specs = []
     for entry in entries:
-        path = _resolve_reference_entry(entry)
-        source_width, source_height, has_audio = _video_metadata(path)
+        external = _is_external_entry(entry)
+        external_frames = entry.get("external_frames") if external else None
+        if external:
+            path = None
+            source_width, source_height = int(external_frames.shape[2]), int(external_frames.shape[1])
+            has_audio = entry.get("audio") is not None
+        else:
+            path = _resolve_reference_entry(entry)
+            source_width, source_height, has_audio = _video_metadata(path)
         # Frames computed by an earlier node (the MiniMax H3 Genjutsu motion guide) replace the file's picture;
         # the file still provides the soundtrack.
         frames = entry.get("frames")
@@ -1915,10 +2103,13 @@ def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=Non
         if frames is not None:
             source_width, source_height = int(frames.shape[2]), int(frames.shape[1])
             target_size = (source_width, source_height)
+            external_frames = None  # the computed frames replace the external picture too
         elif source_width and source_height:
             target_size = _fit_dimensions(source_width, source_height, area_cap)
         trim_start, trim_seconds = _entry_trim_window(entry, max_seconds)
         entry_frames = min(max_frames, max(1, round(trim_seconds * max(1.0, float(fps)))))
+        if external_frames is not None:
+            entry_frames = min(entry_frames, int(external_frames.shape[0]))
         if entry_frames >= 5:
             while entry_frames % 17 != 5:
                 entry_frames -= 1
@@ -1933,6 +2124,8 @@ def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=Non
             "trim_start": trim_start,
             "has_audio": has_audio,
             "frames": frames,
+            "external_frames": external_frames,
+            "audio_data": entry.get("audio") if external else None,
         })
     return specs
 
@@ -1957,6 +2150,9 @@ class _LazyImageReferences:
         for spec in self.specs:
             target_width, target_height = spec["target_size"]
             _log_media_resize("image", spec["name"], spec["source_size"], spec["target_size"])
+            if spec.get("pixels") is not None:
+                yield _load_entry_image({"source": EXTERNAL_SOURCE, "pixels": spec["pixels"]}, target_width, target_height)
+                continue
             yield _load_reference_image(spec["path"], target_width, target_height)
 
 
@@ -1992,6 +2188,21 @@ class _LazyVideoReferences:
                         f"Reference video {index + 1} ('{spec['name']}') has fewer than 5 usable frames "
                         "(~0.2s at 24 fps)."
                     )
+                yield f"ref_video_{index}", frames
+                continue
+            if spec.get("external_frames") is not None:
+                source = spec["external_frames"][:spec["max_frames"]]
+                if source.shape[0] < 5:
+                    raise ValueError(
+                        f"Reference video {index + 1} ('{spec['name']}') has fewer than 5 usable frames "
+                        "(~0.2s at 24 fps)."
+                    )
+                _log_media_resize("video", spec["name"], spec["source_size"], spec["target_size"])
+                target_width, target_height = spec["target_size"]
+                frames = torch.empty((int(source.shape[0]), target_height, target_width, 3), dtype=torch.float32)
+                for start in range(0, int(source.shape[0]), EXTERNAL_CHUNK):
+                    chunk = source[start:start + EXTERNAL_CHUNK].to(torch.float32).mul_(1.0 / 255.0)
+                    frames[start:start + chunk.shape[0]] = _resize_image_tensor(chunk, target_width, target_height)
                 yield f"ref_video_{index}", frames
                 continue
             _log_media_resize("video", spec["name"], spec["source_size"], spec["target_size"])
@@ -2032,6 +2243,8 @@ class _LazyVideoAudioReferences:
             return default
         if not spec["has_audio"]:
             return default
+        if index not in self._cache and spec.get("path") is None:
+            self._cache[index] = _cut_audio(spec.get("audio_data"), spec["audio_seconds"])
         if index not in self._cache:
             self._cache[index] = _decode_video_audio(
                 spec["path"], spec["audio_seconds"], trim_start=spec.get("trim_start", 0.0)
@@ -2067,11 +2280,14 @@ class _LazyAudioOnlyReferences:
 
     def values(self):
         for spec in self.video_specs:
-            audio = _decode_video_audio(
-                spec["path"],
-                min(float(spec["audio_seconds"]), self.per_item_seconds),
-                trim_start=spec.get("trim_start", 0.0),
-            )
+            if spec.get("path") is None:
+                audio = _cut_audio(spec.get("audio_data"), min(float(spec["audio_seconds"]), self.per_item_seconds))
+            else:
+                audio = _decode_video_audio(
+                    spec["path"],
+                    min(float(spec["audio_seconds"]), self.per_item_seconds),
+                    trim_start=spec.get("trim_start", 0.0),
+                )
             if audio is None:
                 raise ValueError(
                     f"Reference video '{spec['name']}' has no usable soundtrack. "
@@ -2135,6 +2351,22 @@ class SECoursesReferenceGallery:
                 "batch_run_id": ("STRING", {"default": ""}),
                 "batch_item_index": ("INT", {"default": -1, "min": -1, "max": BATCH_MAX_PROMPTS - 1}),
                 "batch_item_count": ("INT", {"default": 0, "min": 0, "max": BATCH_MAX_PROMPTS}),
+                "external_image_sequence": ("IMAGE", {
+                    "tooltip": "Optional image sequence (EXR, DPX, PNG...) from any loader node, used as a silent reference "
+                               "video, one image per frame at video_fps. It becomes @video1; gallery videos move after it. "
+                               "Values are clipped to 0-1, so convert scene-linear EXR to sRGB before the gallery.",
+                }),
+                "external_video_with_audio": ("VIDEO", {
+                    "tooltip": "Optional video with its soundtrack (eg from Load Video), resampled to video_fps. It becomes "
+                               "the next @video after external_image_sequence (@video1 when that is not connected); gallery "
+                               "videos move after it.",
+                }),
+                "external_images": ("IMAGE", {
+                    "tooltip": "Optional reference image(s) from any loader node. A batch (eg from Batch Images) is split "
+                               "into one reference per image, max 9. They become @image1, @image2...; gallery images move "
+                               "after them. Batch nodes resize every image to the first one's size, so batch images of "
+                               "similar aspect ratio.",
+                }),
             },
         }
 
@@ -2166,7 +2398,11 @@ class SECoursesReferenceGallery:
         "basename to an init image, init audio, or both; other media remains reference material. Media comes only "
         "from the prompt's own directory, with gallery attachments as fallback. Optional toggles merge after the final "
         "job or feed 1, 5, 22, 39, or 56 of each completed video's final frames into the next prompt. A prompt filename ending in "
-        "'_<integer>.txt' overrides that item's output duration in compatible presets."
+        "'_<integer>.txt' overrides that item's output duration in compatible presets. Optional external inputs take "
+        "media from other nodes and come before the gallery files: external_image_sequence (IMAGE, eg an EXR plate "
+        "converted to sRGB; a silent video at video_fps), external_video_with_audio (VIDEO, eg Load Video; resampled, "
+        "with its soundtrack) and external_images (IMAGE; a batch, eg from Batch Images, becomes @image1, @image2... "
+        "up to 9)."
     )
 
     def collect(
@@ -2183,10 +2419,24 @@ class SECoursesReferenceGallery:
         batch_item_count=0,
         match_batch_init_media=False,
         continuation_context_frames="1",
+        external_image_sequence=None,
+        external_video_with_audio=None,
+        external_images=None,
     ):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
         context_frames = _continuation_context_frame_count(continuation_context_frames)
+        external_video_entries = []
+        if external_image_sequence is not None:
+            external_video_entries.append(_external_sequence_entry(external_image_sequence, video_fps, max_seconds))
+        if external_video_with_audio is not None:
+            external_video_entries.append(_external_video_entry(external_video_with_audio, video_fps, max_seconds))
+        external_image_entries = _external_image_entries(external_images) if external_images is not None else []
+        if external_video_entries or external_image_entries:
+            # External inputs come first: they are @image1.. / @video1.. and the gallery files follow.
+            manifest = dict(manifest)
+            manifest["images"] = [*external_image_entries, *manifest["images"]]
+            manifest["videos"] = [*external_video_entries, *manifest["videos"]]
         folder_batch = _collect_folder_batch(
             batch_folder, manifest, video_fps, max_seconds, bool(match_batch_init_media)
         )
@@ -2198,6 +2448,10 @@ class SECoursesReferenceGallery:
         if folder_batch is not None:
             packs, prompts = folder_batch
             batch_source = "folder"
+            for pack in packs:
+                if pack.get("batch", {}).get("uses_folder_media"):
+                    pack["images"] = [*external_image_entries, *pack["images"]]
+                    pack["videos"] = [*external_video_entries, *pack["videos"]]
         elif chained_prompts:
             prompts = [prompt, *chained_prompts]
             if not str(prompt).strip():
@@ -2303,7 +2557,9 @@ class SECoursesReferenceGallery:
         batch_item_count=0,
         match_batch_init_media=False,
         continuation_context_frames="1",
+        **_external_inputs,
     ):
+        # External IMAGE / AUDIO inputs are linked values; ComfyUI's cache already re-runs the node when they change.
         digest = hashlib.sha256()
         digest.update(
             repr(
