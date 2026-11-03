@@ -83,6 +83,13 @@ occluded faces can still drift.
   Prompt** do the same from decoded frames and a prompt string; SwarmUI's
   MiniMaxH3References extension builds its Genjutsu graph from them.
 
+## MiniMax H3 automatic helpers
+
+- **Genjutsu method `background replace`**: your video and a location image, nothing else. SAM 3.1 finds the person, the biggest person and anyone near their size stay, their pixels are held and pasted back through the exact mask, and everything else is made new from the image. No reference video and no prompt are needed.
+- **MiniMax H3 Auto Prompt**: an empty prompt is written by a local vision model from the inputs; for cut and drag it also names the subject. A typed prompt passes through and the model is not loaded.
+- **MiniMax H3 Story**: `---` lines in the prompt split a shared description from its scenes, and each context window follows the scene for its place in the video (`split_conds_to_windows` on). A prompt without `---` is not touched.
+- **MiniMax H3 Load Clip From Gallery**: the gallery's first video as H3 frames (24 FPS, 17n+5 frames, a size divisible by 32) with its soundtrack.
+
 ## Optional MiniMax H3 RefMods
 
 The updated H3 presets include **MiniMax H3 Optional RefMods**. Leave it empty
