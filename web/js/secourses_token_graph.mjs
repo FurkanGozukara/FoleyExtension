@@ -235,6 +235,8 @@ function parseManifest(value) {
 
 export const GENJUTSU_CLASS = "SECoursesH3Genjutsu";
 const GENJUTSU_ALIGNED = "aligned guide + task LoRA";
+const GENJUTSU_MASKED = "masked edit";
+const GENJUTSU_BACKGROUND_REPLACE = "background replace"; // holds the clip in the latent, no reference video
 const GENJUTSU_DECODE_AREA_CAP = 768 * 1344; // reference_gallery_nodes.VIDEO_DECODE_AREA_CAP
 // Text tokens the Genjutsu template, the Auto Describe fields and the background rules add to a prompt that is not a
 // complete H3 prompt: 847 on the shadowboxing example (video background, Auto Describe); the description varies it.
@@ -288,8 +290,10 @@ async function genjutsuPlan(ctx, node) {
     const [guideWidth, guideHeight] = genjutsuGuideSize(decodedWidth, decodedHeight,
         asNumber(await ctx.input(node, "guide_megapixels")) ?? 0.15);
     const guide = { ...clip, width: guideWidth, height: guideHeight, duration: length / H3.FPS, trimStart: null, trimEnd: null };
-    const aligned = (await ctx.input(node, "method")) === GENJUTSU_ALIGNED;
-    return { pack: { ...pack, genjutsu: true, videos: aligned ? pack.videos.slice(1) : [guide, ...pack.videos.slice(1)] },
+    const method = await ctx.input(node, "method");
+    const aligned = method === GENJUTSU_ALIGNED;
+    const noGuide = aligned || method === GENJUTSU_BACKGROUND_REPLACE;
+    return { pack: { ...pack, genjutsu: true, genjutsuMethod: method, videos: noGuide ? pack.videos.slice(1) : [guide, ...pack.videos.slice(1)] },
         width, height, length, clip, alignedGuide: aligned ? { ...clip, kind: "video", frames: length, duration: length / H3.FPS } : null };
 }
 
@@ -397,7 +401,7 @@ export const NODE_EVALUATORS = {
         const method = (await ctx.input(node, "method")) || "original Genjutsu";
         if (slot === 9) return method;
         if (slot === 10) return ctx.input(node, "background");
-        if (slot === 11) return method !== GENJUTSU_ALIGNED && asBool(await ctx.input(node, "native_speedup")) !== false;
+        if (slot === 11) return ![GENJUTSU_ALIGNED, GENJUTSU_MASKED, GENJUTSU_BACKGROUND_REPLACE].includes(method) && asBool(await ctx.input(node, "native_speedup")) !== false;
         if (slot === 1) {
             const override = await ctx.input(node, "prompt_override");
             if (typeof override === "string" && override.trim()) return override;
@@ -692,7 +696,7 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
         if (pack?.genjutsu) {
             // the Genjutsu node writes the template (Auto Describe fields, background rules) around short notes
             if (!isFullH3Prompt(prompt)) spec.textTokens = H3.textTokens(prompt) + GENJUTSU_TEMPLATE_TOKENS;
-            label = "Genjutsu character swap";
+            label = pack.genjutsuMethod === GENJUTSU_BACKGROUND_REPLACE ? "Background replace" : pack.genjutsuMethod === GENJUTSU_MASKED ? "Masked edit" : "Genjutsu character swap";
         }
     } else {
         spec = {

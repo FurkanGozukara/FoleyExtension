@@ -45,8 +45,11 @@ except ImportError:  # direct test-module import
 
 FPS = 24
 BACKGROUNDS = ("video (character replacement)", "image (motion transfer)")
-METHODS = ("original Genjutsu", "Genjutsu + task LoRA", "aligned guide + task LoRA", "masked edit", "face swap LoRA")
-MASKED_EDIT, FACE_SWAP = METHODS[3], METHODS[4]
+METHODS = ("original Genjutsu", "Genjutsu + task LoRA", "aligned guide + task LoRA", "masked edit", "face swap LoRA", "background replace")
+MASKED_EDIT, FACE_SWAP, BACKGROUND_REPLACE = METHODS[3], METHODS[4], METHODS[5]
+# Methods that hold pixels of the clip through the Masked Video Edit Latent node.
+HOLD_METHODS = (MASKED_EDIT, BACKGROUND_REPLACE)
+MAIN_PEOPLE_RATIO = 0.12
 _METHOD_INPUT = (METHODS, {
     "default": METHODS[0],
     "tooltip": "Original keeps the inverted native video reference. Task LoRA improves character transfer with the same guide. "
@@ -54,7 +57,9 @@ _METHOD_INPUT = (METHODS, {
                "it uses more tokens and dense INT8 attention. Use Genjutsu Apply with either task method. "
                "Masked edit regenerates only the target (shown to H3 as a grey figure) and keeps every other pixel of "
                "the clip; it needs the Masked Video Edit Latent node of the presets. Face swap LoRA keeps the clip as it "
-               "is and changes only the face to the one in @image1 (FaceSwap LoRA, trigger word Faceswap).",
+               "is and changes only the face to the one in @image1 (FaceSwap LoRA, trigger word Faceswap). Background replace "
+               "keeps the target person exactly as filmed and regenerates everything around them from the location in "
+               "@image1; the prompt is written for you (it also needs the Masked Video Edit Latent node).",
 })
 # Masked edit (grey mannequin guide and edit mask, as in openjutsu): the person's mask gets this much of its height as
 # headroom above the head for hair and hats; the grey figure keeps soft shading so the motion stays readable.
@@ -180,6 +185,8 @@ def method_prompt(prompt, method, background, has_audio=True, target="", autogen
         return prompt
     if method == FACE_SWAP:
         return prompt
+    if method == BACKGROUND_REPLACE:
+        return prompt if is_full_prompt(prompt) else background_replace_prompt(prompt, has_audio)
     text = str(prompt)
     if method == MASKED_EDIT:
         # No task LoRA and no trigger: the grey figure is the motion source and the clip's own pixels are held.
@@ -213,6 +220,31 @@ def method_prompt(prompt, method, background, has_audio=True, target="", autogen
     trigger = "body_swap" if background == BACKGROUNDS[0] else "motion_transfer"
     text = re.sub(r"^\s*(?:body_swap|motion_transfer)\s*:\s*", "", text, count=1, flags=re.IGNORECASE)
     return trigger + ": " + text
+
+
+def background_replace_prompt(notes="", has_audio=True):
+    """The whole prompt of the background replace method. The person's pixels are held in the latent and pasted back, so
+    the prompt only describes the new place from @image1; no reference video is used."""
+    notes = str(notes or "").strip()
+    sound = ("The existing soundtrack continues unchanged; no new dialogue, no music." if has_audio
+             else "Natural ambience of the location; no dialogue, no music.")
+    return (
+        "subject_definitions:\n"
+        "<Picture 1> is the new location.\n\n"
+        "summary:\n"
+        "[video editing] A person stays exactly as they are; everything around them is the location of <Picture 1>, in "
+        "every frame.\n\n"
+        "retention_analysis:\n"
+        "<Picture 1>: partially_preserved - preserve the place: its architecture or landscape, colours, light and mood.\n\n"
+        "detailed_description:\n"
+        "Continuous, photorealistic shot in the look of a real camera.\n"
+        "[Shot 1] The whole environment around the person is the location of <Picture 1>, extended naturally to fill the "
+        "frame, with natural perspective and depth of field, moving with the camera. The person stands on the ground of "
+        "this location, with soft natural contact shadows. The light, colours and weather stay constant from the first "
+        "frame to the last. No new people, no text, no logos, no watermarks.\n"
+        + (notes + "\n" if notes else "")
+        + "\noverall_soundscape:\n" + sound + "\n\nnon_diegetic_music:\nN/A"
+    )
 
 
 def face_swap_prompt(prompt):
@@ -518,7 +550,7 @@ def build_motion_guide(frames, sam3_model, sam3_clip, target, background, guide_
     """Motion guide for ``frames`` ([T, H, W, 3] float 0-1 or uint8).
 
     ``guide_style`` "inverted" colour-inverts the performer (Genjutsu), "mannequin" draws a grey figure on the clip
-    (masked edit). Returns the guide frames (float, about ``guide_megapixels``), the performer masks (bool, frame size)
+    (masked edit), "person on grey" shows the person alone on neutral grey (background replace). Returns the guide frames (float, about ``guide_megapixels``), the performer masks (bool, frame size)
     and the number of frames that had no detection of their own."""
     import comfy.utils
     import torch
@@ -558,6 +590,13 @@ def build_motion_guide(frames, sam3_model, sam3_clip, target, background, guide_
             mask = comfy.utils.common_upscale(mask, guide_width, guide_height, "bilinear", "disabled").squeeze(1)
             guide[start:start + chunk.shape[0]] = grey_mannequins(small, mask.clamp(0.0, 1.0))
             continue
+        if guide_style == "person on grey":
+            # Background replace: only for the preview; the generation has no reference video.
+            mask = masks[start:start + chunk.shape[0]].to(torch.float32).unsqueeze(-1)
+            composite = chunk * mask + torch.full_like(chunk, NEUTRAL_GREY) * (1.0 - mask)
+            scaled = comfy.utils.common_upscale(composite.movedim(-1, 1), guide_width, guide_height, "area", "disabled")
+            guide[start:start + chunk.shape[0]] = scaled.movedim(1, -1)
+            continue
         mask = _grow(masks[start:start + chunk.shape[0]].to(torch.float32), mask_grow).unsqueeze(-1)
         base = chunk if background == BACKGROUNDS[0] else torch.full_like(chunk, NEUTRAL_GREY)
         composite = base * (1.0 - mask) + (1.0 - chunk) * mask
@@ -573,16 +612,44 @@ def build_motion_guide(frames, sam3_model, sam3_clip, target, background, guide_
     return guide, masks, missed
 
 
+def keep_main_people(masks, ratio=MAIN_PEOPLE_RATIO):
+    """Distant passers-by would float in the new place: in every frame keep the biggest person and anyone near their size.
+    A small dilation joins the parts of one person (a hand, a gap at a strap), so they are never dropped."""
+    import numpy as np
+    import torch
+    from scipy import ndimage
+
+    reach = max(1, round(int(masks.shape[1]) * 0.015))
+    kept = masks.clone()
+    for index in range(int(masks.shape[0])):
+        frame = masks[index:index + 1].float().unsqueeze(1)
+        joined = torch.nn.functional.max_pool2d(frame, 2 * reach + 1, stride=1, padding=reach)[0, 0].numpy() > 0.5
+        labels, count = ndimage.label(joined)
+        if count < 2:
+            continue
+        mask = masks[index].numpy()
+        areas = ndimage.sum_labels(mask, labels, index=np.arange(1, count + 1))
+        keep = np.flatnonzero(areas >= ratio * areas.max()) + 1
+        kept[index] = torch.from_numpy(mask & np.isin(labels, keep))
+    return kept
+
+
 def method_guide(frames, sam3_model, sam3_clip, target, background, guide_megapixels, threshold, refine_iterations,
                  mask_grow, method):
     """The @video1 guide and the target masks for ``method``. Masked edit: grey figures on the clip and masks with
-    headroom (the region to regenerate). Face swap: the clip itself, unchanged, and no detection."""
+    headroom (the region to regenerate). Face swap: the clip itself, unchanged, and no detection. Background replace:
+    the person alone on grey (the preview) and the inverted person mask."""
     import torch
 
     if method == FACE_SWAP:
         return _unit_images(frames), torch.zeros(frames.shape[:3], dtype=torch.bool)
     if method == MASKED_EDIT and background != BACKGROUNDS[0]:
         raise ValueError("Masked edit keeps every pixel of the clip around the target: set background to 'video'.")
+    if method == BACKGROUND_REPLACE:
+        # The mask names what is regenerated (red in the preview): everything except the person.
+        guide, masks, _missed = build_motion_guide(frames, sam3_model, sam3_clip, target, background, guide_megapixels,
+                                                   threshold, refine_iterations, 0, "person on grey")
+        return guide, ~keep_main_people(masks)
     guide, masks, _missed = build_motion_guide(
         frames, sam3_model, sam3_clip, target, background, guide_megapixels, threshold, refine_iterations,
         0 if method == MASKED_EDIT else mask_grow, "mannequin" if method == MASKED_EDIT else "inverted",
@@ -752,6 +819,8 @@ class SECoursesH3GenjutsuPrompt:
         if method == FACE_SWAP:
             return (face_swap_prompt(prompt),)
         has_audio = audio is not None and audio["waveform"].numel() > 0
+        if method == BACKGROUND_REPLACE:
+            return (method_prompt(prompt, method, background, has_audio, target, False),)
         if images is not None:
             images = images[:usable_frame_count(images.shape[0])]
         text = build_prompt(prompt, background, describe_clip, images, character, speech, speech_language, has_audio)
@@ -845,6 +914,10 @@ class SECoursesH3Genjutsu:
             prompt = str(prompt_override)
         if method == FACE_SWAP:
             prompt = face_swap_prompt(prompt)
+        elif method == BACKGROUND_REPLACE:
+            if not references.get("images"):
+                raise ValueError("Background replace needs the new background: add an image to the gallery (it becomes @image1).")
+            prompt = method_prompt(prompt, method, background, source_audio is not None, target, False)
         else:
             character = None
             images = references.get("images") or []
@@ -860,13 +933,13 @@ class SECoursesH3Genjutsu:
         if match_source_aspect:
             width, height = source_aspect_size(width, height, int(frames.shape[2]), int(frames.shape[1]))
         # Aligned guides go to Genjutsu Apply; a masked edit hands the clip's own frames to the Masked Video Edit Latent.
-        aligned = _unit_images(frames) if method in (METHODS[2], MASKED_EDIT) else None
-        edit_mask = masks.float() if method == MASKED_EDIT else None
+        aligned = _unit_images(frames) if method in (METHODS[2], *HOLD_METHODS) else None
+        edit_mask = masks.float() if method in HOLD_METHODS else None
         if method == METHODS[2]:
             mask_preview, guide_preview = guide_previews(frames, masks, aligned)
         del frames, masks
         pack = dict(references)
-        pack["videos"] = videos[1:] if method == METHODS[2] else [dict(entry, frames=guide), *videos[1:]]
+        pack["videos"] = videos[1:] if method in (METHODS[2], BACKGROUND_REPLACE) else [dict(entry, frames=guide), *videos[1:]]
         pack["prompt"] = prompt
         print(
             f"[SECoursesH3Genjutsu] @video1 '{entry.get('name') or '?'}': {length} frames "
@@ -875,17 +948,60 @@ class SECoursesH3Genjutsu:
             flush=True,
         )
         return (pack, prompt, int(width), int(height), length, source_audio, mask_preview, guide_preview,
-                aligned, method, background, bool(native_speedup and method not in (METHODS[2], MASKED_EDIT)),
+                aligned, method, background, bool(native_speedup and method not in (METHODS[2], *HOLD_METHODS)),
                 edit_mask)
 
 
+class SECoursesH3LoadClip:
+    """The gallery's first video as frames at 24 FPS, on H3's frame grid, with its soundtrack (none for a silent clip)."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        return {
+            "required": {
+                "references": (REF_PACK_TYPE, {"tooltip": "From a SECourses Reference Gallery node; its first video is used (Load + trim picks the part)."}),
+                "max_megapixels": ("FLOAT", {"default": 1.0, "min": 0.1, "max": 4.0, "step": 0.01,
+                    "tooltip": "A bigger clip is reduced to about this size for the generation; a smaller clip keeps its size."}),
+            },
+        }
+
+    CATEGORY = "SECourses/references"
+    RETURN_TYPES = ("IMAGE", "AUDIO", "INT", "INT", "INT")
+    RETURN_NAMES = ("images", "audio", "frames", "width", "height")
+    FUNCTION = "load"
+    DESCRIPTION = "Decode the first video of the gallery for H3: 24 FPS, 17n+5 frames, a size divisible by 32 that keeps its aspect ratio."
+
+    def load(self, references, max_megapixels):
+        import comfy.utils
+
+        videos = references.get("videos") or [] if isinstance(references, dict) else []
+        if not videos:
+            raise ValueError("Add your video to the gallery first.")
+        entry = videos[0]
+        path = _resolve_reference_entry(entry)
+        trim_start, seconds = _entry_trim_window(entry, float(references.get("max_seconds", 15.0)))
+        frames = _decode_video_frames(path, FPS, max_frames=max(1, round(seconds * FPS)), area_cap=round(max_megapixels * 1_000_000),
+                                      trim_start=trim_start)
+        length = usable_frame_count(frames.shape[0])
+        frames = _unit_images(frames[:length])
+        height, width = int(frames.shape[1]), int(frames.shape[2])
+        fit_w = max(CANVAS_MULTIPLE, round(width / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        fit_h = max(CANVAS_MULTIPLE, round(height / CANVAS_MULTIPLE) * CANVAS_MULTIPLE)
+        if (fit_w, fit_h) != (width, height):
+            frames = comfy.utils.common_upscale(frames.movedim(-1, 1), fit_w, fit_h, "lanczos", "center").clamp(0.0, 1.0).movedim(1, -1)
+        audio = _decode_video_audio(path, length / FPS, trim_start=trim_start)
+        return (frames, audio, length, fit_w, fit_h)
+
+
 NODE_CLASS_MAPPINGS = {
+    "SECoursesH3LoadClip": SECoursesH3LoadClip,
     "SECoursesH3GenjutsuMotionGuide": SECoursesH3GenjutsuMotionGuide,
     "SECoursesH3GenjutsuPrompt": SECoursesH3GenjutsuPrompt,
     "SECoursesH3Genjutsu": SECoursesH3Genjutsu,
 }
 
 NODE_DISPLAY_NAME_MAPPINGS = {
+    "SECoursesH3LoadClip": "MiniMax H3 Load Clip From Gallery",
     "SECoursesH3GenjutsuMotionGuide": "MiniMax H3 Genjutsu Motion Guide (SAM 3.1)",
     "SECoursesH3GenjutsuPrompt": "MiniMax H3 Genjutsu Prompt",
     "SECoursesH3Genjutsu": "MiniMax H3 Genjutsu (Gallery)",

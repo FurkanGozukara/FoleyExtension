@@ -5,7 +5,7 @@ from comfy_extras.nodes_minimax_h3 import MiniMaxH3AddGuide
 from comfy_extras.nodes_model_advanced import ModelAttentionBackend
 from nodes import LoraLoaderModelOnly
 
-from .genjutsu_nodes import BACKGROUNDS, FACE_SWAP, MASKED_EDIT, METHODS
+from .genjutsu_nodes import BACKGROUNDS, FACE_SWAP, HOLD_METHODS, METHODS
 
 CHARACTER_LORA = "minimax_h3_character_swap_v1.1_ref2va_fro.safetensors"
 MOTION_LORA = "minimax_h3_motion_transfer_v1.0_ref2va.safetensors"
@@ -41,8 +41,8 @@ class SECoursesH3GenjutsuApply(io.ComfyNode):
                 training_adapter=TRAINING_ADAPTER, guide=None, face_swap_lora=FACE_SWAP_LORA):
         if method not in METHODS or background not in BACKGROUNDS:
             raise ValueError("Use the method and background outputs of the Genjutsu node.")
-        if method in (METHODS[0], MASKED_EDIT):
-            # A masked edit holds the clip's pixels in the latent; no task LoRA is trained for its grey figures.
+        if method in (METHODS[0], *HOLD_METHODS):
+            # These methods hold the clip's pixels in the latent; no task LoRA is trained for them.
             return io.NodeOutput(model, positive)
         if method == FACE_SWAP:
             files = [face_swap_lora]

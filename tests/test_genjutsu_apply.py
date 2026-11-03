@@ -45,12 +45,13 @@ class GenjutsuApplyTests(unittest.TestCase):
         self.assertIs(add.call_args.kwargs['latent'], latent)
         dense.assert_called_once_with('patched', 'comfy kitchen attention')
 
-    def test_masked_edit_needs_no_task_lora(self):
-        model, positive = object(), object()
-        with mock.patch.object(apply, 'LoraLoaderModelOnly') as loader:
-            result = apply.SECoursesH3GenjutsuApply.execute(model, positive, {}, object(), method=apply.MASKED_EDIT)
-        self.assertEqual(result.args, (model, positive))
-        loader.assert_not_called()
+    def test_hold_methods_need_no_task_lora(self):
+        for method in apply.HOLD_METHODS:
+            model, positive = object(), object()
+            with mock.patch.object(apply, 'LoraLoaderModelOnly') as loader:
+                result = apply.SECoursesH3GenjutsuApply.execute(model, positive, {}, object(), method=method)
+            self.assertEqual(result.args, (model, positive))
+            loader.assert_not_called()
 
     def test_face_swap_loads_the_face_swap_lora_only(self):
         with mock.patch.object(apply, 'LoraLoaderModelOnly') as loader:

@@ -273,5 +273,50 @@ class GenjutsuGuideTests(unittest.TestCase):
         self.assertEqual((width, height), (round(1344 * scale), round(768 * scale)))
 
 
+class BackgroundReplacePrompt(unittest.TestCase):
+    def test_prompt_uses_only_the_location_image(self):
+        text = genjutsu_nodes.background_replace_prompt()
+        self.assertIn("<Picture 1> is the new location.", text)
+        self.assertNotIn("<Video 1>", text)
+        self.assertIn("soundtrack continues unchanged", text)
+
+    def test_silent_clip_gets_location_ambience(self):
+        text = genjutsu_nodes.background_replace_prompt(has_audio=False)
+        self.assertNotIn("soundtrack continues unchanged", text)
+        self.assertIn("Natural ambience of the location", text)
+
+    def test_method_is_a_hold_method(self):
+        self.assertIn(genjutsu_nodes.BACKGROUND_REPLACE, genjutsu_nodes.HOLD_METHODS)
+        self.assertIn(genjutsu_nodes.MASKED_EDIT, genjutsu_nodes.HOLD_METHODS)
+        self.assertIn(genjutsu_nodes.BACKGROUND_REPLACE, genjutsu_nodes.METHODS)
+        self.assertEqual(genjutsu_nodes.METHODS[3:5], (genjutsu_nodes.MASKED_EDIT, genjutsu_nodes.FACE_SWAP), "the earlier methods keep their order")
+
+
+class KeepMainPeople(unittest.TestCase):
+    def _mask(self):
+        import torch
+        masks = torch.zeros((2, 200, 300), dtype=torch.bool)
+        masks[:, 40:190, 100:180] = True  # the person
+        masks[:, 90:110, 184:190] = True  # a hand just beside them
+        masks[:, 20:30, 10:15] = True     # a passer-by far away
+        return masks
+
+    def test_drops_the_passer_by_and_keeps_the_hand(self):
+        kept = genjutsu_nodes.keep_main_people(self._mask())
+        self.assertTrue(bool(kept[0, 100, 140]))
+        self.assertTrue(bool(kept[1, 100, 186]), "the hand joins the person")
+        self.assertFalse(bool(kept[0, 25, 12]), "the passer-by goes")
+
+    def test_two_people_of_similar_size_both_stay(self):
+        masks = self._mask()
+        masks[:, 40:190, 210:285] = True
+        kept = genjutsu_nodes.keep_main_people(masks)
+        self.assertTrue(bool(kept[0, 100, 250]))
+
+    def test_empty_mask_stays_empty(self):
+        import torch
+        self.assertFalse(bool(genjutsu_nodes.keep_main_people(torch.zeros((1, 50, 50), dtype=torch.bool)).any()))
+
+
 if __name__ == "__main__":
     unittest.main()
