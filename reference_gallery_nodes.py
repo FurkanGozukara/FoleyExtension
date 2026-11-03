@@ -974,11 +974,27 @@ def _run_ffmpeg_concat(ffmpeg, manifest_path, output_path):
         raise RuntimeError(f"Folder batch video merge failed: {detail}")
 
 
+def _save_h264_video(video, path, metadata=None):
+    from comfy_api.latest import Types
+
+    options = {}
+    get_chroma = getattr(video, "get_chroma_subsampling", None)
+    if get_chroma is not None and get_chroma() == "none":
+        # Older CreateVideo workflows can load the codec's "none" into chroma.
+        options["chroma_subsampling"] = "420"
+    video.save_to(
+        str(path),
+        format=Types.VideoContainer.MP4,
+        codec=Types.VideoCodec.H264,
+        metadata=metadata,
+        **options,
+    )
+
+
 def _merge_batch_video_group(group):
     import tempfile
 
     import folder_paths
-    from comfy_api.latest import Types
     from imageio_ffmpeg import get_ffmpeg_exe
 
     prefix = _merge_output_prefix(group["root"], group["folder"])
@@ -995,11 +1011,7 @@ def _merge_batch_video_group(group):
         segment_paths = []
         for index, video in enumerate(group["videos"], start=1):
             segment_path = temp_path / f"segment_{index:05}.mp4"
-            video.save_to(
-                str(segment_path),
-                format=Types.VideoContainer.MP4,
-                codec=Types.VideoCodec.H264,
-            )
+            _save_h264_video(video, segment_path)
             segment_paths.append(segment_path)
         manifest_path = temp_path / "concat.txt"
         _write_concat_manifest(manifest_path, segment_paths)
@@ -1016,7 +1028,6 @@ def _merge_batch_video_group(group):
 
 def _save_video_output(video, filename_prefix, prompt=None, extra_pnginfo=None):
     import folder_paths
-    from comfy_api.latest import Types
 
     width, height = video.get_dimensions()
     full_output_folder, filename, counter, subfolder, _ = folder_paths.get_save_image_path(
@@ -1032,12 +1043,7 @@ def _save_video_output(video, filename_prefix, prompt=None, extra_pnginfo=None):
         metadata.update(extra_pnginfo)
     if isinstance(prompt, dict):
         metadata["prompt"] = prompt
-    video.save_to(
-        str(output_path),
-        format=Types.VideoContainer.MP4,
-        codec=Types.VideoCodec.H264,
-        metadata=metadata or None,
-    )
+    _save_h264_video(video, output_path, metadata or None)
     return {
         "filename": output_name,
         "subfolder": subfolder,
