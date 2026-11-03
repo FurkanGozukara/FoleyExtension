@@ -3,6 +3,22 @@
 SECourses custom nodes for ComfyUI, installed automatically by the SECourses
 ComfyUI installers into `ComfyUI/StandaloneCustomNodes/FoleyExtension`.
 
+## November 2026: masked edit, face swap, relight prompt, first-frame line
+
+- Genjutsu `method` adds **masked edit**: SAM 3.1 finds the target (a person or an object), the
+  guide draws it as a smooth grey figure (head band blurred harder so glasses or hats of the
+  original do not show through), and the new `edit_mask` output (the target with headroom above the
+  head) drives ComfyUI-TeaCache's MiniMax H3 Masked Video Edit Latent: the clip is encoded into the
+  generation and only the target's cells are regenerated; MiniMax H3 Masked Edit Composite pastes
+  them over the original frames. No task LoRA is used. The idea follows openjutsu.
+- **face swap LoRA**: the clip itself stays `@video1`, the prompt becomes `Faceswap` (notes follow it)
+  and Genjutsu Apply loads UntMods' FaceSwap LoRA (new optional `face_swap_lora` input, appended).
+- **MiniMax H3 Relight Prompt** (`relight_nodes.py`): 1-3 designed lights or one of 20 looks become a
+  complete H3 lighting plan for `<Video 1>` (or `<Picture 1>`), with a lit-sphere preview.
+- First-frame-only FL2VA runs (`SECoursesMiniMaxH3TextOnly`) now get the official I2VA alignment line
+  when the prompt has none, like last-frame runs already did.
+- Outputs and inputs were appended, never inserted, so saved workflows keep their slots.
+
 ## MiniMax H3 Genjutsu (character swap)
 
 Updated 27 October 2026: `method` preserves **original Genjutsu**, adds **Genjutsu + task LoRA**,

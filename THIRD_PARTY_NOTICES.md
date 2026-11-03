@@ -78,3 +78,11 @@ SOFTWARE.
 
 ```
 
+## H3 community methods (November 2026)
+
+Written as our own code from the published descriptions of these projects, reviewed on 2026-11-03:
+
+- Masked edit and grey-figure guide (`genjutsu_nodes.py`): the approach of [openjutsu](https://github.com/D3voz/openjutsu) by D3voz (reviewed at its 2026-10-30 commit).
+- Relight prompt (`relight_nodes.py`): the lighting-plan approach of [H3-Relight](https://github.com/NyckM/H3-Relight-Minimax-ComfyUI) by NyckM / Bruxos do VFX, reviewed at `f6019c0`; the 20 look presets and 25 atmosphere phrases are adapted from its `web/relight_data.js`.
+- Face swap method: uses the [FaceSwap LoRA](https://huggingface.co/UntMods/FaceSwap_MiniMaxH3_REF2VA) by UntMods, downloaded unchanged.
+

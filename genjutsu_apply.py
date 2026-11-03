@@ -5,11 +5,12 @@ from comfy_extras.nodes_minimax_h3 import MiniMaxH3AddGuide
 from comfy_extras.nodes_model_advanced import ModelAttentionBackend
 from nodes import LoraLoaderModelOnly
 
-from .genjutsu_nodes import BACKGROUNDS, METHODS
+from .genjutsu_nodes import BACKGROUNDS, FACE_SWAP, MASKED_EDIT, METHODS
 
 CHARACTER_LORA = "minimax_h3_character_swap_v1.1_ref2va_fro.safetensors"
 MOTION_LORA = "minimax_h3_motion_transfer_v1.0_ref2va.safetensors"
 TRAINING_ADAPTER = "minimax_h3_ref2va_training_adapter_v2.safetensors"
+FACE_SWAP_LORA = "SS_FaceSwap_MiniMax_H3_REF2VA.safetensors"
 
 
 class SECoursesH3GenjutsuApply(io.ComfyNode):
@@ -28,6 +29,8 @@ class SECoursesH3GenjutsuApply(io.ComfyNode):
                 io.Combo.Input("motion_lora", options=loras, default=MOTION_LORA),
                 io.Combo.Input("training_adapter", options=loras, default=TRAINING_ADAPTER),
                 io.Image.Input("guide", optional=True),
+                io.Combo.Input("face_swap_lora", options=loras, default=FACE_SWAP_LORA, optional=True,
+                               tooltip="FaceSwap LoRA (UntMods) for the face swap method, loaded at 1.0."),
             ],
             outputs=[io.Model.Output(), io.Conditioning.Output()],
         )
@@ -35,12 +38,16 @@ class SECoursesH3GenjutsuApply(io.ComfyNode):
     @classmethod
     def execute(cls, model, positive, latent, vae, method=METHODS[0], background=BACKGROUNDS[0],
                 character_lora=CHARACTER_LORA, motion_lora=MOTION_LORA,
-                training_adapter=TRAINING_ADAPTER, guide=None):
+                training_adapter=TRAINING_ADAPTER, guide=None, face_swap_lora=FACE_SWAP_LORA):
         if method not in METHODS or background not in BACKGROUNDS:
             raise ValueError("Use the method and background outputs of the Genjutsu node.")
-        if method == METHODS[0]:
+        if method in (METHODS[0], MASKED_EDIT):
+            # A masked edit holds the clip's pixels in the latent; no task LoRA is trained for its grey figures.
             return io.NodeOutput(model, positive)
-        files = [character_lora] if background == BACKGROUNDS[0] else [training_adapter, motion_lora]
+        if method == FACE_SWAP:
+            files = [face_swap_lora]
+        else:
+            files = [character_lora] if background == BACKGROUNDS[0] else [training_adapter, motion_lora]
         loader = LoraLoaderModelOnly()
         for filename in files:
             model = loader.load_lora_model_only(model, filename, 1.0)[0]

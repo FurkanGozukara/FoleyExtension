@@ -45,6 +45,21 @@ class GenjutsuApplyTests(unittest.TestCase):
         self.assertIs(add.call_args.kwargs['latent'], latent)
         dense.assert_called_once_with('patched', 'comfy kitchen attention')
 
+    def test_masked_edit_needs_no_task_lora(self):
+        model, positive = object(), object()
+        with mock.patch.object(apply, 'LoraLoaderModelOnly') as loader:
+            result = apply.SECoursesH3GenjutsuApply.execute(model, positive, {}, object(), method=apply.MASKED_EDIT)
+        self.assertEqual(result.args, (model, positive))
+        loader.assert_not_called()
+
+    def test_face_swap_loads_the_face_swap_lora_only(self):
+        with mock.patch.object(apply, 'LoraLoaderModelOnly') as loader:
+            loader.return_value.load_lora_model_only.side_effect = lambda model, filename, strength: (filename,)
+            result = apply.SECoursesH3GenjutsuApply.execute('base', 'positive', {}, 'vae', method=apply.FACE_SWAP)
+        self.assertEqual([call.args[1:] for call in loader.return_value.load_lora_model_only.call_args_list],
+                         [(apply.FACE_SWAP_LORA, 1.0)])
+        self.assertEqual(result.args, (apply.FACE_SWAP_LORA, 'positive'))
+
     def test_schema_exposes_all_bundle_dependencies(self):
         files = [apply.CHARACTER_LORA, apply.MOTION_LORA, apply.TRAINING_ADAPTER]
         with mock.patch.object(apply.folder_paths, 'get_filename_list', return_value=files):

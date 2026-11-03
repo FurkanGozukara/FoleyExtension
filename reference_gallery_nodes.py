@@ -3269,6 +3269,11 @@ def _has_keyframe_alignment(prompt):
     return head.startswith("how the reference pictures align") or head.startswith("for the target video, at")
 
 
+FIRST_FRAME_ALIGNMENT_LINE = (
+    "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully referenced."
+)
+
+
 def _keyframe_alignment_line(has_first_frame, length):
     """The FL2VA alignment line of the MiniMax H3 / Pika H3 Flex prompt format for a last frame."""
     end = f"{int(length) / 24.0:.2f}"
@@ -3338,6 +3343,9 @@ class SECoursesMiniMaxH3TextOnly:
         prompt = translate_reference_tokens(prompt, 0, 0, 0, 0)
         if last_frame is not None and not _has_keyframe_alignment(prompt):
             prompt = _keyframe_alignment_line(first_frame is not None, length) + "\n\n" + prompt
+        elif first_frame is not None and not _has_keyframe_alignment(prompt):
+            # The official image-to-video (i2va) form of the same line.
+            prompt = FIRST_FRAME_ALIGNMENT_LINE + "\n\n" + prompt
         output = MiniMaxH3ImageToVideo.execute(
             clip=clip,
             vae=vae,

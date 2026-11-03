@@ -59,10 +59,23 @@ class TextOnlyLastFrameTests(unittest.TestCase):
         captured = self.run_text_only(prompt, "first", "last")
         self.assertEqual(captured["prompt"], prompt)
 
-    def test_first_frame_only_prompt_is_unchanged(self):
+    def test_first_frame_only_gets_the_i2va_alignment_line(self):
         captured = self.run_text_only("integrated_multimodal_description: x", "first", None)
-        self.assertEqual(captured["prompt"], "integrated_multimodal_description: x")
+        self.assertEqual(
+            captured["prompt"],
+            "For the target video, at 0.00 seconds into the target video, <Picture 1> (from [Shot 1]) is fully "
+            "referenced.\n\nintegrated_multimodal_description: x",
+        )
         self.assertIsNone(captured["last_frame"])
+
+    def test_first_frame_only_keeps_a_user_alignment_line(self):
+        prompt = "For the target video, at 0.00 seconds into the target video, <Picture 1> is fully referenced.\n\nx"
+        captured = self.run_text_only(prompt, "first", None)
+        self.assertEqual(captured["prompt"], prompt)
+
+    def test_text_only_prompt_is_unchanged(self):
+        captured = self.run_text_only("integrated_multimodal_description: x", None, None)
+        self.assertEqual(captured["prompt"], "integrated_multimodal_description: x")
 
 
 if __name__ == "__main__":
