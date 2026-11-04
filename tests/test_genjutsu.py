@@ -332,5 +332,36 @@ class KeepMainPeople(unittest.TestCase):
         self.assertTrue(torch.equal(kept[0, 200:1000, 700:1300], masks[0, 200:1000, 700:1300]), "the person's mask keeps its exact edge")
 
 
+class CameraIsStill(unittest.TestCase):
+    def _scene(self):
+        import torch
+        torch.manual_seed(1)
+        return torch.nn.functional.interpolate(torch.rand(1, 3, 27, 48), size=(270, 480), mode="bilinear")[0].movedim(0, -1)
+
+    def test_a_still_camera_with_a_moving_person(self):
+        import torch
+        frames = self._scene().unsqueeze(0).repeat(60, 1, 1, 1)
+        for i in range(60):
+            frames[i, 60:210, 180 + i:260 + i] = i / 60.0
+        self.assertTrue(genjutsu_nodes.camera_is_still(frames))
+
+    def test_a_moving_camera(self):
+        import torch
+        scene = self._scene()
+        frames = torch.stack([torch.roll(scene, shifts=i * 3, dims=1) for i in range(60)])
+        self.assertFalse(genjutsu_nodes.camera_is_still(frames))
+
+    def test_frames_in_0_to_255(self):
+        import torch
+        scene = (self._scene() * 255).to(torch.uint8)
+        self.assertTrue(genjutsu_nodes.camera_is_still(scene.unsqueeze(0).repeat(30, 1, 1, 1)))
+        self.assertFalse(genjutsu_nodes.camera_is_still(torch.stack([torch.roll(scene, shifts=i * 3, dims=1) for i in range(30)])))
+
+    def test_prompt_wording(self):
+        self.assertIn("locked off on a tripod", genjutsu_nodes.background_replace_prompt(still_camera=True))
+        self.assertNotIn("moving with the camera", genjutsu_nodes.background_replace_prompt(still_camera=True))
+        self.assertIn("moving with the camera", genjutsu_nodes.background_replace_prompt())
+
+
 if __name__ == "__main__":
     unittest.main()
