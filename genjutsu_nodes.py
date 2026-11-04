@@ -614,23 +614,27 @@ def build_motion_guide(frames, sam3_model, sam3_clip, target, background, guide_
 
 def keep_main_people(masks, ratio=MAIN_PEOPLE_RATIO):
     """Distant passers-by would float in the new place: in every frame keep the biggest person and anyone near their size.
-    A small dilation joins the parts of one person (a hand, a gap at a strap), so they are never dropped."""
+    A small dilation joins the parts of one person (a hand, a gap at a strap), so they are never dropped. The decision is
+    made on a copy about 192 lines high, so this stays fast at any clip size."""
     import numpy as np
     import torch
     from scipy import ndimage
 
-    reach = max(1, round(int(masks.shape[1]) * 0.015))
+    height, width = int(masks.shape[1]), int(masks.shape[2])
+    step = max(1, height // 192)
+    reach = max(1, round(height * 0.015 / step))
     kept = masks.clone()
     for index in range(int(masks.shape[0])):
         frame = masks[index:index + 1].float().unsqueeze(1)
-        joined = torch.nn.functional.max_pool2d(frame, 2 * reach + 1, stride=1, padding=reach)[0, 0].numpy() > 0.5
+        small = torch.nn.functional.max_pool2d(frame, step, stride=step) if step > 1 else frame
+        joined = torch.nn.functional.max_pool2d(small, 2 * reach + 1, stride=1, padding=reach)[0, 0].numpy() > 0.5
         labels, count = ndimage.label(joined)
         if count < 2:
             continue
-        mask = masks[index].numpy()
-        areas = ndimage.sum_labels(mask, labels, index=np.arange(1, count + 1))
-        keep = np.flatnonzero(areas >= ratio * areas.max()) + 1
-        kept[index] = torch.from_numpy(mask & np.isin(labels, keep))
+        areas = ndimage.sum_labels(small[0, 0].numpy(), labels, index=np.arange(1, count + 1))
+        chosen = np.isin(labels, np.flatnonzero(areas >= ratio * areas.max()) + 1)
+        whole = torch.nn.functional.interpolate(torch.from_numpy(chosen).float()[None, None], size=(height, width), mode="nearest")[0, 0] > 0.5
+        kept[index] = masks[index] & whole
     return kept
 
 

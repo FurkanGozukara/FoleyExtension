@@ -317,6 +317,20 @@ class KeepMainPeople(unittest.TestCase):
         import torch
         self.assertFalse(bool(genjutsu_nodes.keep_main_people(torch.zeros((1, 50, 50), dtype=torch.bool)).any()))
 
+    def test_large_frames_stay_fast_and_correct(self):
+        import time
+        import torch
+        masks = torch.zeros((3, 1080, 1920), dtype=torch.bool)
+        masks[:, 200:1000, 700:1300] = True
+        masks[:, 500:560, 1320:1360] = True  # a hand just beside the person
+        masks[:, 100:130, 100:115] = True    # a passer-by far away
+        t0 = time.time()
+        kept = genjutsu_nodes.keep_main_people(masks)
+        self.assertLess(time.time() - t0, 3.0, "must not cost seconds per frame")
+        self.assertTrue(bool(kept[0, 530, 1340]), "the hand stays")
+        self.assertFalse(bool(kept[2, 115, 107]), "the passer-by goes")
+        self.assertTrue(torch.equal(kept[0, 200:1000, 700:1300], masks[0, 200:1000, 700:1300]), "the person's mask keeps its exact edge")
+
 
 if __name__ == "__main__":
     unittest.main()
