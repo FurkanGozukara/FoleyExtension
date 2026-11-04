@@ -696,7 +696,7 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
         if (pack?.genjutsu) {
             // the Genjutsu node writes the template (Auto Describe fields, background rules) around short notes
             if (!isFullH3Prompt(prompt)) spec.textTokens = H3.textTokens(prompt) + GENJUTSU_TEMPLATE_TOKENS;
-            label = pack.genjutsuMethod === GENJUTSU_BACKGROUND_REPLACE ? "Background replace" : pack.genjutsuMethod === GENJUTSU_MASKED ? "Masked edit" : "Genjutsu character swap";
+            label = pack.genjutsuMethod === GENJUTSU_BACKGROUND_REPLACE ? "Background replace" : pack.genjutsuMethod === GENJUTSU_MASKED ? "Masked edit" : pack.genjutsuMethod === "face swap LoRA" ? "Face swap" : "Genjutsu character swap";
         }
     } else {
         spec = {
@@ -763,9 +763,16 @@ export async function estimateFromPrompt(output, galleryNodeId) {
             if (spec.width == null) { spec.width = H3_DEFAULTS.width; approximate = true; }
             if (spec.height == null) { spec.height = H3_DEFAULTS.height; approximate = true; }
             if (spec.frames == null) { spec.frames = H3_DEFAULTS.length; approximate = true; }
+            // With context windows each window is one packed sequence: the limit applies per window, not to the whole video.
+            let perWindow = "";
+            const windowsId = Object.keys(output).find((key) => output[key].class_type === "MiniMaxH3ContextWindows" && active.has(key));
+            if (windowsId) {
+                const windowFrames = asNumber(await resolver.input(output[windowsId], "context_length"));
+                if (windowFrames > 0 && spec.frames > windowFrames) { spec.frames = windowFrames; perWindow = " · per window"; }
+            }
             const estimate = H3.estimate(spec);
             estimate.approximate = estimate.approximate || approximate;
-            results.push({ id, node, complete: result.complete, estimate, label: result.label });
+            results.push({ id, node, complete: result.complete, estimate, label: result.label + perWindow });
         } catch (error) {
             // one unreadable candidate must not hide the others
         }
