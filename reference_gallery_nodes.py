@@ -34,6 +34,7 @@ from __future__ import annotations
 import base64
 import hashlib
 import io
+import itertools
 import json
 import math
 import os
@@ -1903,11 +1904,12 @@ def _prepare_image_references(entries, width, height, ref_image_size, byte_budge
     return specs
 
 
-def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=None):
+def _prepare_video_references(entries, fps, max_seconds, length, byte_budget=None, max_pixels=None):
+    """``max_pixels`` (the output's pixel area when the gallery downscales videos) lowers the decode canvas further."""
     max_frames = _usable_video_frame_count(length, fps, max_seconds)
     budget = _available_media_budget(VIDEO_FLOAT_BUDGET) if byte_budget is None else int(byte_budget)
     float_pixel_budget = max(1, budget // (max(1, max_frames) * RGB_FLOAT_BYTES_PER_PIXEL))
-    area_cap = max(CANVAS_MULTIPLE ** 2, min(VIDEO_DECODE_AREA_CAP, float_pixel_budget))
+    area_cap = max(CANVAS_MULTIPLE ** 2, min(VIDEO_DECODE_AREA_CAP, float_pixel_budget, max_pixels or VIDEO_DECODE_AREA_CAP))
     audio_seconds = min(float(max_seconds), max_frames / max(1.0, float(fps)))
 
     specs = []
@@ -2141,6 +2143,12 @@ class SECoursesReferenceGallery:
                 "batch_run_id": ("STRING", {"default": ""}),
                 "batch_item_index": ("INT", {"default": -1, "min": -1, "max": BATCH_MAX_PROMPTS - 1}),
                 "batch_item_count": ("INT", {"default": 0, "min": 0, "max": BATCH_MAX_PROMPTS}),
+                "downscale_videos": ("BOOLEAN", {
+                    "default": True,
+                    "label_on": "VIDEOS: DOWNSCALED TO OUTPUT SIZE",
+                    "label_off": "VIDEOS: UP TO 1344x768",
+                    "tooltip": "On (default): every reference video and the Genjutsu clip is decoded straight to the output's pixel area (aspect ratio kept, never enlarged), so a 4K clip never sits in memory at 4K. Off: videos keep the previous canvas of up to 1344x768 pixels even when the output is smaller. Images use the adapter's Reference Image Size instead.",
+                }),
             },
         }
 
@@ -2189,6 +2197,7 @@ class SECoursesReferenceGallery:
         batch_item_count=0,
         match_batch_init_media=False,
         continuation_context_frames="1",
+        downscale_videos=True,
     ):
         manifest = _parse_manifest(references)
         max_seconds = max(1.0, float(max_seconds))
@@ -2236,6 +2245,8 @@ class SECoursesReferenceGallery:
             batch_source = "inline"
 
         if batch_source is not None:
+            for pack in packs:
+                pack["downscale_videos"] = bool(downscale_videos)
             run_id = str(batch_run_id or "").strip()
             if run_id:
                 if not re.fullmatch(r"[0-9A-Za-z_-]{8,128}", run_id):
@@ -2283,6 +2294,7 @@ class SECoursesReferenceGallery:
             "images": [dict(entry) for entry in manifest["images"]],
             "videos": [dict(entry) for entry in manifest["videos"]],
             "audios": [dict(entry) for entry in manifest["audios"]],
+            "downscale_videos": bool(downscale_videos),
         }
         summary = ", ".join(
             f"{len(values)} {kind}" for kind, values in
@@ -2309,6 +2321,7 @@ class SECoursesReferenceGallery:
         batch_item_count=0,
         match_batch_init_media=False,
         continuation_context_frames="1",
+        downscale_videos=True,
     ):
         digest = hashlib.sha256()
         digest.update(
@@ -2326,6 +2339,7 @@ class SECoursesReferenceGallery:
                     str(batch_run_id),
                     int(batch_item_index),
                     int(batch_item_count),
+                    bool(downscale_videos),
                 )
             ).encode("utf-8")
         )
@@ -3104,7 +3118,9 @@ class SECoursesMiniMaxH3References:
             fps = max(1.0, float(references.get("video_fps", 24.0)))
             max_seconds = max(1.0, float(references.get("max_seconds", 15.0)))
             image_specs = _prepare_image_references(images, width, height, ref_image_size)
-            video_specs = _prepare_video_references(videos, fps, max_seconds, length)
+            video_specs = _prepare_video_references(
+                videos, fps, max_seconds, length,
+                max_pixels=width * height if references.get("downscale_videos", True) else None)
             ref_images = _LazyImageReferences(image_specs)
             if audio_only_mode:
                 missing_audio = [spec["name"] for spec in video_specs if not spec["has_audio"]]
@@ -3536,6 +3552,210 @@ class SECoursesLoadVideoAudioB64:
         return (audio,)
 
 
+def _decode_video_at_size(source, start_time, duration, fps_out, max_pixels):
+    """SwarmUI's Video Slice -> Get Video Components -> SwarmVideoResampleFPS ("linear") chain in one pass, with
+    each frame scaled to ``max_pixels`` (aspect ratio kept, never enlarged) as it is decoded, so the clip is never
+    held at its full size. The trim window, frame selection, rotation and soundtrack follow ComfyUI's
+    ``VideoFromFile.get_components_internal``; the frame-rate change blends neighbouring frames like Swarm's
+    resampler, keeping only the two source frames it needs. Returns (float frames [T, H, W, 3], AUDIO or None)."""
+    import av
+    import comfy.utils
+    import numpy as np
+    import torch
+    from comfy_api.latest._input_impl.video_types import _rotation_quadrant, last_decodable_audio_stream
+
+    fps_out = float(fps_out)
+    frames = []
+    audio_frames = []
+    previous = None
+    count = 0
+    size = None
+    align_graph = None
+    next_output = 0
+
+    def blend(position, lower, lower_pixels, upper_pixels):
+        weight = np.float32(position - lower)
+        return lower_pixels * (np.float32(1.0) - weight) + upper_pixels * weight
+
+    with av.open(source, mode="r") as container:
+        if not container.streams.video:
+            raise ValueError("The reference video has no video stream.")
+        video_stream = container.streams.video[0]
+        video_stream.thread_type = "AUTO"
+        fps_in = float(video_stream.average_rate) if video_stream.average_rate else 1.0
+        resample = not math.isclose(fps_in, fps_out)
+        start_pts = int(start_time / video_stream.time_base)
+        end_pts = int((start_time + duration) / video_stream.time_base)
+        if start_pts != 0:
+            container.seek(start_pts, stream=video_stream)
+
+        streams = [video_stream]
+        video_done = False
+        audio_done = True
+        has_first_audio_frame = False
+        audio_stream = last_decodable_audio_stream(container)
+        if audio_stream is not None:
+            streams.append(audio_stream)
+            resampler = av.audio.resampler.AudioResampler(format="fltp")
+            audio_done = False
+
+        for packet in container.demux(*streams):
+            if video_done and audio_done:
+                break
+            if packet.stream.type == "video":
+                if video_done:
+                    continue
+                try:
+                    for frame in packet.decode():
+                        if frame.pts < start_pts:
+                            continue
+                        if duration and frame.pts >= end_pts:
+                            video_done = True
+                            break
+                        # One frame at a time, converted exactly like ComfyUI's decoder: 8-bit RGB for full-range JPEG
+                        # YUV and RGB sources, float RGB otherwise (padded to a width multiple of 32 first, which keeps
+                        # FFmpeg's float conversion deterministic), then rotated. Only then is it scaled down.
+                        if frame.format.name in ("yuvj420p", "yuvj422p", "yuvj444p", "rgb24", "rgba", "pal8"):
+                            pixels = frame.to_ndarray(format="rgb24").astype(np.float32) / 255.0
+                        elif frame.width % 32:
+                            if align_graph is None:
+                                pad_width = (frame.width + 31) // 32 * 32
+                                pad_height = (frame.height + 31) // 32 * 32
+                                graph = av.filter.Graph()
+                                graph_source = graph.add_buffer(width=frame.width, height=frame.height,
+                                                                format=frame.format.name, time_base=video_stream.time_base)
+                                graph_pad = graph.add("pad", f"{pad_width}:{pad_height}:0:0")
+                                graph_fill = graph.add("fillborders", f"left=0:right={pad_width - frame.width}:top=0:"
+                                                                      f"bottom={pad_height - frame.height}:mode=smear")
+                                graph_sink = graph.add("buffersink")
+                                graph_source.link_to(graph_pad)
+                                graph_pad.link_to(graph_fill)
+                                graph_fill.link_to(graph_sink)
+                                graph.configure()
+                                align_graph = (graph_source, graph_sink)
+                            align_graph[0].push(frame)
+                            pixels = align_graph[1].pull().to_ndarray(format="gbrpf32le")[:frame.height, :frame.width]
+                        else:
+                            pixels = frame.to_ndarray(format="gbrpf32le")
+                        quadrant = _rotation_quadrant(frame)
+                        if quadrant:
+                            pixels = np.rot90(pixels, k=quadrant, axes=(0, 1))
+                        pixels = torch.from_numpy(np.ascontiguousarray(pixels))
+                        if size is None:
+                            size = _fit_dimensions(pixels.shape[1], pixels.shape[0], max_pixels, multiple=1)
+                        if (pixels.shape[1], pixels.shape[0]) != size:
+                            pixels = comfy.utils.common_upscale(pixels.movedim(-1, 0).unsqueeze(0), size[0], size[1],
+                                                                "area", "disabled")[0].movedim(0, -1)
+                        if not resample:
+                            frames.append(pixels)
+                        else:
+                            # Output frame i sits at source position i / fps_out * fps_in, between frames
+                            # floor(position) and floor(position) + 1.
+                            while math.floor(next_output / fps_out * fps_in) == count - 1:
+                                position = next_output / fps_out * fps_in
+                                frames.append(blend(position, count - 1, previous, pixels))
+                                next_output += 1
+                            previous = pixels
+                        count += 1
+                except av.error.InvalidDataError:
+                    pass  # like ComfyUI's decoder, a damaged packet is skipped
+            elif packet.stream.type == "audio":
+                if audio_done:
+                    continue
+                for audio_frame in itertools.chain.from_iterable(map(resampler.resample, packet.decode())):
+                    if duration and audio_frame.time > start_time + duration:
+                        audio_done = True
+                        break
+                    if not has_first_audio_frame:
+                        offset_seconds = start_time - audio_frame.pts * audio_stream.time_base
+                        to_skip = max(0, int(offset_seconds * audio_stream.sample_rate))
+                        if to_skip < audio_frame.samples:
+                            has_first_audio_frame = True
+                            audio_frames.append(audio_frame.to_ndarray()[..., to_skip:])
+                    else:
+                        audio_frames.append(audio_frame.to_ndarray())
+
+        audio = None
+        if audio_frames:
+            audio_data = np.concatenate(audio_frames, axis=1)
+            if duration:
+                audio_data = audio_data[..., :int(duration * audio_stream.sample_rate)]
+            audio = {
+                "waveform": torch.from_numpy(audio_data).unsqueeze(0),
+                "sample_rate": int(audio_stream.sample_rate) if audio_stream.sample_rate else 1,
+            }
+
+    if count == 0:
+        raise ValueError(f"The reference video has no frames between {start_time:g}s and {start_time + duration:g}s.")
+    if resample and count == 1:
+        frames = [previous]  # the resampler passes a single frame through
+    elif resample:
+        # The resampler's frame count; positions past the last source frame repeat it.
+        output_count = max(1, round(count / fps_in * fps_out))
+        del frames[output_count:]
+        while next_output < output_count:
+            position = next_output / fps_out * fps_in
+            lower = min(max(math.floor(position), 0), count - 1)
+            frames.append(blend(position, lower, previous, previous))
+            next_output += 1
+    output = torch.empty((len(frames), *frames[0].shape), dtype=torch.float32)
+    for index in range(len(frames)):  # filled frame by frame, so the clip is never held twice
+        output[index] = frames[index]
+        frames[index] = None
+    return output, audio
+
+
+class SECoursesLoadVideoB64AtSize:
+    """SwarmUI's reference video loader when MiniMax H3 downscales videos to the output size."""
+
+    @classmethod
+    def INPUT_TYPES(cls):
+        try:
+            import nodes
+            max_resolution = nodes.MAX_RESOLUTION
+        except ImportError:
+            max_resolution = 16384
+        return {
+            "required": {
+                "video_base64": ("STRING", {"multiline": True}),
+                "start_seconds": ("FLOAT", {"default": 0.0, "min": 0.0, "max": 100000.0, "step": 0.001,
+                                            "tooltip": "Start of the part to use, in seconds."}),
+                "duration": ("FLOAT", {"default": 15.0, "min": 0.001, "max": 100000.0, "step": 0.001,
+                                       "tooltip": "Length of the part to use, in seconds; a shorter video ends earlier."}),
+                "fps": ("FLOAT", {"default": 24.0, "min": 1.0, "max": 240.0, "step": 1.0,
+                                  "tooltip": "Frame rate of the frames returned; neighbouring frames are blended like SwarmUI's resampler."}),
+                "width": ("INT", {"default": 1344, "min": 32, "max": max_resolution, "step": 32}),
+                "height": ("INT", {"default": 768, "min": 32, "max": max_resolution, "step": 32}),
+            },
+        }
+
+    CATEGORY = "SECourses/references"
+    RETURN_TYPES = ("IMAGE", "AUDIO")
+    RETURN_NAMES = ("images", "audio")
+    FUNCTION = "load"
+    DESCRIPTION = (
+        "Decodes a base64 video straight to the pixel area of width x height (aspect ratio kept, never enlarged) at "
+        "the given frame rate, with its soundtrack. Same frames and sound as Video Slice -> Get Video Components -> "
+        "SwarmVideoResampleFPS, without holding the full-size clip in memory."
+    )
+
+    def load(self, video_base64, start_seconds, duration, fps, width, height):
+        payload = str(video_base64).strip()
+        if payload.startswith("data:") and "," in payload:
+            payload = payload.split(",", 1)[1]
+        try:
+            video_bytes = base64.b64decode(payload)
+        except (ValueError, TypeError) as error:
+            raise ValueError("Reference video contains invalid base64 data.") from error
+        if not video_bytes:
+            raise ValueError("Reference video is empty.")
+        frames, audio = _decode_video_at_size(io.BytesIO(video_bytes), max(0.0, float(start_seconds)),
+                                              float(duration), float(fps), int(width) * int(height))
+        print(f"[SECoursesLoadVideoB64AtSize] {frames.shape[0]} frames at {frames.shape[2]}x{frames.shape[1]} "
+              f"({fps:g} fps) for a {width}x{height} output", flush=True)
+        return (frames, audio)
+
+
 class SECoursesTrimAudio:
     """Trim an AUDIO value to a user-selected duration without imposing a model policy cap."""
 
@@ -3580,6 +3800,7 @@ NODE_CLASS_MAPPINGS = {
     "SECoursesMiniMaxH3TextOnly": SECoursesMiniMaxH3TextOnly,
     "SECoursesMiniMaxH3Auto": SECoursesMiniMaxH3Auto,
     "SECoursesLoadVideoAudioB64": SECoursesLoadVideoAudioB64,
+    "SECoursesLoadVideoB64AtSize": SECoursesLoadVideoB64AtSize,
     "SECoursesTrimAudio": SECoursesTrimAudio,
 }
 
@@ -3596,6 +3817,7 @@ NODE_DISPLAY_NAME_MAPPINGS = {
     "SECoursesMiniMaxH3TextOnly": "MiniMax H3 Text Only (Gallery Prompt)",
     "SECoursesMiniMaxH3Auto": "MiniMax H3 Auto FL2VA / Ref2VA (Gallery)",
     "SECoursesLoadVideoAudioB64": "Load Video Soundtrack (Base64, No Frames)",
+    "SECoursesLoadVideoB64AtSize": "Load Video At Output Size (Base64)",
     "SECoursesTrimAudio": "Trim Reference Audio",
 }
 

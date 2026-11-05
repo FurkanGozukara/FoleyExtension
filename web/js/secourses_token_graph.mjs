@@ -448,6 +448,7 @@ export const NODE_EVALUATORS = {
             batchActive: batchFolder !== "",
             videoFps: asNumber(await ctx.input(node, "video_fps")) ?? 24,
             maxSeconds: asNumber(await ctx.input(node, "max_seconds")) ?? 15,
+            downscaleVideos: asBool(await ctx.input(node, "downscale_videos")) !== false,
             images: await describe(manifest.images, "image"),
             videos: await describe(manifest.videos, "video"),
             audios: await describe(manifest.audios, "audio"),
@@ -688,7 +689,7 @@ async function h3GalleryAdapter(resolver, node, active, id, mode) {
             refImages: continuationFrames === 1 ? [...images, { width: canvas.width, height: canvas.height }].slice(0, H3.MAX_IMAGES) : images,
             refVideos: videos, refAudios: audios,
             refImageSize: (await resolver.input(node, "ref_image_size")) || "match",
-            maxSeconds: pack?.maxSeconds ?? 15, audioOnly,
+            maxSeconds: pack?.maxSeconds ?? 15, audioOnly, downscaleVideos: pack?.downscaleVideos !== false,
             keyframeImages: extras.keyframeImages, keyframeVideoFrames: multiFrameContext + extras.keyframeVideoFrames,
             audioGuide: extras.audioGuide || extras.audioKeyframes > 0, pipeline: "secourses",
         };

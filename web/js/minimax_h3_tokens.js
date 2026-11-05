@@ -250,6 +250,7 @@
      *   refImageSize: 'match'|'max',
      *   maxSeconds,                  // per-reference duration cap (video/audio)
      *   audioOnly,                   // reference videos contribute only their soundtrack
+     *   downscaleVideos,             // reference videos are decoded at the output's pixel area (gallery switch, Swarm param)
      *   refImages: [{width, height}], refVideos: [{width, height, duration, hasAudio, trimStart, trimEnd}],
      *   refAudios: [{duration, trimStart, trimEnd}],   // unknown metadata (null) is assumed at the caps
      *   keyframeImages,              // first/last-frame style image keyframes (fl2va)
@@ -303,7 +304,7 @@
         let videoAreaCap = MAX_PIXELS;
         if (pipeline === "secourses") {
             const floatPixelBudget = Math.max(1, Math.floor(VIDEO_FLOAT_BUDGET / (Math.max(1, maxRefFrames) * RGB_FLOAT_BYTES_PER_PIXEL)));
-            videoAreaCap = Math.max(CANVAS_MULTIPLE ** 2, Math.min(MAX_PIXELS, floatPixelBudget));
+            videoAreaCap = Math.max(CANVAS_MULTIPLE ** 2, Math.min(MAX_PIXELS, floatPixelBudget, s.downscaleVideos ? width * height : MAX_PIXELS));
         }
         let audioLabel = 0;
         videos.forEach((video, index) => {
@@ -334,6 +335,8 @@
             if (pipeline === "secourses") {
                 [cw, ch] = fitDimensions(vw, vh, videoAreaCap);
             } else {
+                // SwarmUI's loader fits the clip to the output's pixel area (never enlarged) before the core node.
+                if (s.downscaleVideos) [vw, vh] = fitDimensions(vw, vh, width * height, null, 1);
                 [cw, ch] = adaptCanvas(vw, vh);
                 if (vw * vh < cw * ch) {
                     cw = Math.max(CANVAS_MULTIPLE, pyRound(vw / CANVAS_MULTIPLE) * CANVAS_MULTIPLE);

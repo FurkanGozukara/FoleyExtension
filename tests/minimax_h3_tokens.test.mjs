@@ -79,6 +79,23 @@ test("native continuation clips contribute their encoded video latent", () => {
     assert.equal(est.parts.keyframes, H3.videoLatentT(39) * est.rows);
 });
 
+test("downscaled reference videos follow the output's pixel area", () => {
+    const video = { width: 3840, height: 2160, duration: 5, hasAudio: false };
+    const spec = (pipeline, width, height, downscaleVideos) => ({
+        width, height, frames: 124, pipeline, refVideos: [video], downscaleVideos,
+    });
+    const clipT = H3.videoLatentT(H3.alignFramesDown(120));
+    for (const pipeline of ["secourses", "core"]) {
+        // 1344x768 output: the same canvas as before.
+        assert.equal(H3.estimate(spec(pipeline, 1344, 768, true)).parts.refVideos,
+            H3.estimate(spec(pipeline, 1344, 768, false)).parts.refVideos);
+    }
+    // smaller output: the gallery decodes on the 32 px grid at the output area, SwarmUI fits the clip first.
+    assert.equal(H3.estimate(spec("secourses", 832, 480, true)).parts.refVideos, clipT * H3.patchRows(...H3.fitDimensions(3840, 2160, 832 * 480)));
+    assert.equal(H3.estimate(spec("core", 832, 480, true)).parts.refVideos, clipT * H3.patchRows(832, 480));
+    assert.equal(H3.estimate(spec("core", 832, 480, false)).parts.refVideos, clipT * H3.patchRows(1344, 768));
+});
+
 test("formatting", () => {
     assert.equal(H3.formatTokens(999), "999");
     assert.equal(H3.formatTokens(38144), "38.1k");

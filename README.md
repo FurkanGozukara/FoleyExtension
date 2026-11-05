@@ -164,6 +164,12 @@ MiniMax H3, without banks of LoadImage / LoadVideo / LoadAudio nodes.
     are scaled during FFmpeg decode and trimmed to the usable H3 frame count.
     The original aspect ratio is retained on H3's 32-pixel canvas grid, and
     shared RAM budgets prevent high-megapixel attachments from causing an OOM.
+    The gallery's `downscale_videos` switch (on by default) also bounds every
+    reference video and the Genjutsu clip by the output's pixel area; off keeps
+    the previous canvas of up to 1344x768. SwarmUI's MiniMax H3 extension uses
+    `SECoursesLoadVideoB64AtSize` for the same rule: one pass with the trim,
+    frames, 24 FPS blending and soundtrack of Video Slice -> Get Video
+    Components -> SwarmVideoResampleFPS, without the full-size clip in memory.
     Inputs above 100 MP per image or 40 MP per video frame fail with a clear
     validation error instead of attempting an unsafe allocation.
   - Token aliases are case-insensitive: `@image1`, `@IMAGE1`, `@img1`,
